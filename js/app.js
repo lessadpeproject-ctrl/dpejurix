@@ -235,7 +235,8 @@
   }
 
   async function garantirDistancia(origem, comarca, forcar = false) {
-    if (!origem || !comarca) return;
+    // no link do Claude a página não acessa o Google: a tarefa automática grava as distâncias no banco
+    if (!origem || !comarca || nuvem.tipo === 'claude') return;
     const k = chaveDist(origem, comarca);
     if (distanciaTabela(origem, comarca) || (nomeMunicipio(origem) && nomeMunicipio(origem) === nomeMunicipio(comarca))) return;
     const salvo = state.distancias[k];
@@ -289,12 +290,20 @@
     catch (e) { persistente = false; console.warn('Não foi possível salvar no navegador', e); }
   }
 
-  // ------------------------------------------------------------------ nuvem (Firebase, dados compartilhados)
-  // Com js/firebase-config.js preenchido, os dados ficam no Firestore e são compartilhados entre os usuários
-  // autorizados (login com Google). Sem configuração, o site funciona só neste navegador (modo local).
+  // ------------------------------------------------------------------ dados compartilhados
+  // Três modos:
+  //  - "claude": página aberta pelo link do Claude; os dados ficam no banco do próprio artefato
+  //    (capacidade db), compartilhado com quem foi convidado como Editor.
+  //  - "firebase": site no GitHub Pages com js/firebase-config.js preenchido (login com Google).
+  //  - local: sem nenhum dos dois, os dados ficam só neste navegador.
 
   const FB = window.FIREBASE_CONFIG && window.FIREBASE_CONFIG.apiKey ? window.FIREBASE_CONFIG : null;
-  const nuvem = { ativo: !!FB, estado: FB ? 'carregando' : 'local', usuario: null, erro: '', db: null, sinc: {}, pronto: {}, escutas: [] };
+  const NO_CLAUDE = !!(window.claude && typeof window.claude.use === 'function');
+  const nuvem = {
+    tipo: NO_CLAUDE ? 'claude' : FB ? 'firebase' : null,
+    ativo: NO_CLAUDE || !!FB, estado: NO_CLAUDE || FB ? 'carregando' : 'local',
+    usuario: null, erro: '', db: null, sinc: {}, pronto: {}, escutas: [], somenteLeitura: false,
+  };
   const COLECOES = ['defensores', 'juris', 'distancias', 'rodoviarias'];
   const SDK = 'https://www.gstatic.com/firebasejs/10.12.2/';
 
@@ -310,10 +319,88 @@
     const v = state[coll];
     return Array.isArray(v) ? Object.fromEntries(v.map((x) => [x.id, x])) : (v || {});
   }
-  const refDoc = (coll, chave) => nuvem.db.collection(coll).doc(encodeURIComponent(chave));
-  const refConfig = () => nuvem.db.collection('config').doc('geral');
+  const clonar = (o) => JSON.parse(JSON.stringify(o));
+
+  // id de documento aceito pelo banco do Claude (letras, dígitos e _ - . ~ : @ +); a chave original vai em _k
+  function idSeguro(k) {
+    if (/^[A-Za-z0-9_~:@+-][A-Za-z0-9_.~:@+-]{0,120}$/.test(k)) return k;
+    return 'k' + btoa(unescape(encodeURIComponent(k))).replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  // ---- operações por tipo de banco
+  const backend = {
+    claude: {
+      escutar(coll, cb) {
+        return nuvem.db.collection(coll).onSnapshot((snap) => {
+          const itens = {};
+          snap.docs.forEach((d) => { const b = clonar(d.data()); const k = b._k || d.id; delete b._k; itens[k] = b; });
+          cb(itens);
+        }, falhaEscuta);
+      },
+      escutarConfig(cb) {
+        return nuvem.db.doc('config/geral').onSnapshot((d) => cb(d.exists ? clonar(d.data()) : {}), falhaEscuta);
+      },
+      enviar(ops) {
+        ops.forEach((op) => enfileirar(op.coll === 'config' ? 'config/geral' : `${op.coll}/${idSeguro(op.k)}`,
+          op.del ? { del: true } : { data: op.coll === 'config' ? op.data : { ...op.data, _k: op.k } }));
+      },
+    },
+    firebase: {
+      ref: (coll, k) => (coll === 'config' ? nuvem.db.collection('config').doc('geral') : nuvem.db.collection(coll).doc(encodeURIComponent(k))),
+      escutar(coll, cb) {
+        return nuvem.db.collection(coll).onSnapshot((snap) => {
+          const itens = {};
+          snap.forEach((d) => { itens[decodeURIComponent(d.id)] = d.data(); });
+          cb(itens);
+        }, falhaEscuta);
+      },
+      escutarConfig(cb) {
+        return this.ref('config').onSnapshot((d) => cb(d.exists ? d.data() : {}), falhaEscuta);
+      },
+      enviar(ops) {
+        for (let i = 0; i < ops.length; i += 400) {
+          const lote = nuvem.db.batch();
+          ops.slice(i, i + 400).forEach((op) => (op.del ? lote.delete(this.ref(op.coll, op.k)) : lote.set(this.ref(op.coll, op.k), op.data)));
+          lote.commit().catch((e) => { console.warn(e); toast('Não foi possível salvar no banco compartilhado: ' + e.message); });
+        }
+      },
+    },
+  };
+
+  // fila de gravação do banco do Claude: uma gravação por documento por vez, no máximo 4 simultâneas;
+  // alterações seguidas no mesmo documento viram uma só
+  const filaPendentes = new Map(), filaEmVoo = new Set();
+  function enfileirar(path, op) { filaPendentes.set(path, op); bombear(); }
+  function bombear() {
+    for (const [path, op] of filaPendentes) {
+      if (filaEmVoo.size >= 4) break;
+      if (filaEmVoo.has(path)) continue;
+      filaPendentes.delete(path); filaEmVoo.add(path);
+      const ref = nuvem.db.doc(path);
+      (op.del ? ref.delete() : ref.set(op.data))
+        .catch((e) => {
+          console.warn('Gravação recusada', path, e);
+          if (e && e.code === 'invalid_argument' && !nuvem.somenteLeitura) { nuvem.somenteLeitura = true; render(); toast('Você tem acesso só de leitura. Peça ao responsável para te convidar como Editor.'); }
+          else if (e && e.code === 'quota_exceeded') toast('O banco compartilhado está cheio: ' + e.message);
+          else if (e && e.code !== 'invalid_argument') toast('Não foi possível salvar uma alteração. Tente de novo.');
+        })
+        .finally(() => { filaEmVoo.delete(path); bombear(); });
+    }
+  }
 
   async function iniciarNuvem() {
+    if (nuvem.tipo === 'claude') {
+      const db = await window.claude.use('db');
+      if (!db) return modoLocal('O banco compartilhado não está disponível nesta visualização.');
+      nuvem.db = db;
+      const user = await window.claude.use('user');
+      const pode = user ? await user.can('data.write') : null;
+      nuvem.somenteLeitura = pode === false;
+      nuvem.estado = 'conectando';
+      render();
+      escutar();
+      return;
+    }
     try {
       for (const f of ['firebase-app-compat.js', 'firebase-auth-compat.js', 'firebase-firestore-compat.js']) await carregarScript(SDK + f);
       firebase.initializeApp(FB);
@@ -326,10 +413,13 @@
         render();
       });
     } catch (e) {
-      // sem acesso ao Firebase (ex.: página aberta dentro do Claude): segue em modo local
-      nuvem.ativo = false; nuvem.estado = 'local'; nuvem.erro = e.message;
-      state = carregar(); render();
+      modoLocal(e.message);
     }
+  }
+
+  function modoLocal(motivo) {
+    nuvem.ativo = false; nuvem.tipo = null; nuvem.estado = 'local'; nuvem.erro = motivo || '';
+    state = carregar(); render();
   }
 
   function pararEscuta() {
@@ -337,37 +427,35 @@
   }
 
   function falhaEscuta(e) {
-    console.warn('Firestore:', e);
-    nuvem.estado = e.code === 'permission-denied' ? 'negado' : 'erro';
-    nuvem.erro = e.message; render();
+    console.warn('Banco compartilhado:', e);
+    nuvem.estado = e && e.code === 'permission-denied' ? 'negado' : 'erro';
+    nuvem.erro = (e && e.message) || String(e); render();
   }
 
   function escutar() {
+    const b = backend[nuvem.tipo];
     for (const coll of COLECOES) {
-      nuvem.escutas.push(nuvem.db.collection(coll).onSnapshot((snap) => {
-        const itens = {};
-        snap.forEach((d) => { itens[decodeURIComponent(d.id)] = d.data(); });
+      nuvem.escutas.push(b.escutar(coll, (itens) => {
         nuvem.sinc[coll] = Object.fromEntries(Object.entries(itens).map(([k, v]) => [k, JSON.stringify(v)]));
         state[coll] = Array.isArray(state[coll]) ? Object.values(itens) : itens;
         nuvem.pronto[coll] = true;
         aoReceber();
-      }, falhaEscuta));
+      }));
     }
-    nuvem.escutas.push(refConfig().onSnapshot((d) => {
-      const cfg = d.exists ? d.data() : {};
+    nuvem.escutas.push(b.escutarConfig((cfg) => {
       state.config = { googleKey: '', ...cfg };
       nuvem.sinc.config = JSON.stringify(state.config);
       nuvem.pronto.config = true;
       aoReceber();
-    }, falhaEscuta));
+    }));
   }
 
   function aoReceber() {
     if (nuvem.estado !== 'pronto') {
       if (!COLECOES.every((c) => nuvem.pronto[c]) || !nuvem.pronto.config) return;
       nuvem.estado = 'pronto';
-      // primeira vez: banco vazio recebe a lista inicial de defensores e o que já estava neste navegador
-      if (!state.defensores.length) {
+      // Firebase: banco vazio recebe a lista inicial de defensores e o que já estava neste navegador
+      if (nuvem.tipo === 'firebase' && !state.defensores.length) {
         const local = carregar();
         COLECOES.forEach((c) => { state[c] = local[c]; });
         if (!state.config.googleKey && local.config.googleKey) state.config.googleKey = local.config.googleKey;
@@ -378,26 +466,23 @@
     render();
   }
 
-  // grava no Firestore só os documentos que mudaram desde a última sincronização
+  // envia só os documentos que mudaram desde a última sincronização
   function enviarMudancas() {
+    if (nuvem.somenteLeitura) { toast('Você tem acesso só de leitura: a alteração não foi salva.'); return; }
     const ops = [];
     for (const coll of COLECOES) {
       const atual = itensDe(coll), antes = nuvem.sinc[coll] || {}, novo = {};
       for (const [k, v] of Object.entries(atual)) {
         const j = JSON.stringify(v);
         novo[k] = j;
-        if (antes[k] !== j) ops.push((b) => b.set(refDoc(coll, k), JSON.parse(j)));
+        if (antes[k] !== j) ops.push({ coll, k, data: JSON.parse(j) });
       }
-      for (const k of Object.keys(antes)) if (!(k in atual)) ops.push((b) => b.delete(refDoc(coll, k)));
+      for (const k of Object.keys(antes)) if (!(k in atual)) ops.push({ coll, k, del: true });
       nuvem.sinc[coll] = novo;
     }
     const cfg = JSON.stringify(state.config || {});
-    if (cfg !== nuvem.sinc.config) { ops.push((b) => b.set(refConfig(), JSON.parse(cfg))); nuvem.sinc.config = cfg; }
-    for (let i = 0; i < ops.length; i += 400) {
-      const lote = nuvem.db.batch();
-      ops.slice(i, i + 400).forEach((op) => op(lote));
-      lote.commit().catch((e) => { console.warn(e); toast('Não foi possível salvar no banco compartilhado: ' + e.message); });
-    }
+    if (cfg !== nuvem.sinc.config) { ops.push({ coll: 'config', k: 'geral', data: JSON.parse(cfg) }); nuvem.sinc.config = cfg; }
+    if (ops.length) backend[nuvem.tipo].enviar(ops);
   }
 
   function telaNuvem() {
@@ -419,6 +504,10 @@
     const el = $('#conta');
     if (!el) return;
     if (!nuvem.ativo) { el.innerHTML = '<span class="conta-modo" title="Os dados ficam só neste navegador">Modo local</span>'; return; }
+    if (nuvem.tipo === 'claude') {
+      el.innerHTML = `<span class="conta-modo" title="Todos os convidados veem os mesmos dados">${nuvem.somenteLeitura ? 'Somente leitura' : 'Dados compartilhados'}</span>`;
+      return;
+    }
     const u = nuvem.usuario;
     el.innerHTML = u ? `<span class="conta-email" title="Dados compartilhados">${esc(u.email)}</span><button class="conta-sair" data-action="sair">Sair</button>` : '';
   }
@@ -450,7 +539,10 @@
   function kmDe(h, def, juri) {
     if (h.kmManual != null && h.kmManual !== '') return { km: Number(h.kmManual), fonte: 'informado manualmente', min: null };
     const d = def && distanciaSalva(def.origem, juri.comarca);
-    return d ? { km: d.km, fonte: d.fonte, min: d.min } : { km: null, fonte: null, min: null };
+    if (d) return { km: d.km, fonte: d.fonte, min: d.min };
+    const a = def && pontoRota(def.origem), b = pontoRota(juri.comarca);
+    if (nuvem.tipo === 'claude' && a && b) return { km: haversineKm(a, b) * 1.3, fonte: 'estimativa (aguardando o Google)', min: null };
+    return { km: null, fonte: null, min: null };
   }
 
   // Ordem: 1) fez art. 422  2) menor distância  3) menos júris realizados  4) menos designações futuras  5) maior antiguidade
@@ -770,7 +862,7 @@
       <div class="panel-head">
         <h2>Defensores habilitados <span class="muted">(${r.ativos.length})</span></h2>
         <div class="actions" style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn sm" data-action="recalcular"${calculando ? ' disabled' : ''}>${calculando ? 'Calculando…' : 'Recalcular distâncias'}</button>
+          ${nuvem.tipo === 'claude' ? '' : `<button class="btn sm" data-action="recalcular"${calculando ? ' disabled' : ''}>${calculando ? 'Calculando…' : 'Recalcular distâncias'}</button>`}
           ${r.vagas && r.ativos.length ? `<button class="btn sm primary" data-action="aplicar-resultado">Designar os ${Math.min(r.vagas, r.ativos.length)} primeiro(s)</button>` : ''}
         </div>
       </div>
@@ -788,6 +880,7 @@
         Ordem de classificação: <b>1.</b> quem fez o art. 422 neste júri tem prioridade · <b>2.</b> menor distância de rodoviária a rodoviária ·
         <b>3.</b> menos júris realizados · <b>4.</b> menos júris futuros designados · <b>5.</b> maior tempo de DPE (antiguidade).
         Com vagas informadas, os primeiros ocupam o resultado e os demais ficam como suplentes.
+        ${nuvem.tipo === 'claude' && r.ativos.some((l) => l.fonteKm && l.fonteKm.startsWith('estimativa')) ? '<br>Distâncias marcadas como “estimativa” são trocadas pela rota do Google automaticamente, em até cerca de 1 hora. A ordem pode mudar quando isso acontecer.' : ''}
       </div>
     </section>`;
   }
