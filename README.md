@@ -17,48 +17,22 @@ Substitui a planilha de controle mensal por telas simples:
 
 ## Como usar
 
-O site é estático (HTML, CSS e JavaScript) e roda no GitHub Pages:
-**Settings → Pages → Deploy from a branch → branch do site, pasta `/ (root)`**.
+- **Site:** Netlify, projeto `dpejurix` (https://dpejurix.netlify.app). Estático, sem build (`netlify.toml` publica a raiz).
+- **Dados:** Supabase, projeto `dpejurix` (região São Paulo). Tudo fica na tabela `docs` (uma linha por defensor, júri, distância, rodoviária e a configuração).
+- **Acesso:** tela de login e senha, sem cadastro nem recuperação de senha. Os usuários ficam na tabela `usuarios` (senha com bcrypt); o login devolve uma sessão que o site envia no cabeçalho `x-sessao`, e as regras de acesso da tabela `docs` só liberam leitura e gravação com sessão válida.
+- **Sincronização:** o site confere a cada 10 segundos (e ao voltar para a aba) se algo mudou e recarrega os dados.
+- **Chaves do Google:** em Configurações, uma por linha; ficam no banco e são usadas em rodízio (quando uma é recusada ou esgota a cota do dia, passa para a próxima).
 
-### Dados compartilhados (Firebase)
+Trocar a senha de um usuário (SQL no painel da Supabase):
 
-Com `js/firebase-config.js` preenchido, os dados ficam no Firestore e são os mesmos para todas as
-pessoas autorizadas, que entram com a conta Google. Sem essa configuração o site funciona só no
-navegador de quem usa (modo local).
-
-Configuração (plano gratuito "Spark", sem cartão):
-
-1. Em https://console.firebase.google.com, crie um projeto.
-2. **Firestore Database → Criar banco de dados** (local `southamerica-east1`, modo de produção).
-3. **Firestore → Regras**: cole as regras abaixo com os e-mails autorizados e publique.
-4. **Authentication → Começar → Google → Ativar**. Em **Authentication → Configurações → Domínios autorizados**, adicione `lessadpeproject-ctrl.github.io`.
-5. **Configurações do projeto → Seus apps → Web (`</>`)**: registre o app e copie o objeto `firebaseConfig` para `js/firebase-config.js` (`window.FIREBASE_CONFIG = { ... };`).
-
-```
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    function autorizado() {
-      return request.auth != null && request.auth.token.email_verified == true
-        && request.auth.token.email.lower() in [
-          'pessoa1@gmail.com', 'pessoa2@gmail.com', 'pessoa3@gmail.com', 'pessoa4@gmail.com'
-        ];
-    }
-    match /{document=**} {
-      allow read, write: if autorizado();
-    }
-  }
-}
+```sql
+update public.usuarios set senha_hash = extensions.crypt('nova-senha', extensions.gen_salt('bf', 10)) where login = 'dpe1@juri';
+delete from public.sessoes where login = 'dpe1@juri';  -- desconecta quem estiver usando
 ```
 
-Na primeira entrada, o banco vazio recebe a lista de defensores e o que estava no navegador.
-A chave do Google Maps salva em Configurações também fica no banco (só as pessoas autorizadas
-leem), então basta uma pessoa informá-la.
+Em **Configurações** há ainda backup (.json), restauração e exportação dos júris para Excel (.csv).
 
-Em **Configurações** há ainda:
-- backup (.json) e restauração;
-- exportação dos júris para Excel (.csv);
-- campo para a chave da API do Google Maps.
+Sem `js/supabase-config.js`, o site funciona só no navegador de quem usa (modo local).
 
 ## Distâncias
 
