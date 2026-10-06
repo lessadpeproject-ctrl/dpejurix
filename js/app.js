@@ -100,7 +100,13 @@
   // Rodoviária de cada município (js/rodoviarias.js): { n: nome, a: endereço, c: [lat, lng], p: place_id }.
   // As rotas saem da rodoviária da cidade do defensor e chegam à rodoviária da comarca.
   const RODOVIARIAS = window.RODOVIARIAS || {};
-  const rodoviaria = (mun) => RODOVIARIAS[nomeMunicipio(mun)] || null;
+  // Tabela do repositório primeiro; depois as localizadas por este navegador (state.rodoviarias).
+  const rodoviaria = (mun) => {
+    const n = nomeMunicipio(mun);
+    if (RODOVIARIAS[n]) return RODOVIARIAS[n];
+    const r = state.rodoviarias && state.rodoviarias[n];
+    return r && r.c ? r : null;
+  };
   const uf = (mun) => (nomeMunicipio(mun) === 'Brasília/DF' ? 'DF' : 'BA');
   const cidade = (mun) => (nomeMunicipio(mun) || mun).replace('/DF', '');
   // Ponto usado no cálculo: rodoviária localizada ou, se não houver, a sede do município.
@@ -117,17 +123,65 @@
   }
 
   // Google Routes API (computeRouteMatrix) — ponto de partida e destino pelas coordenadas da sede do município
-  async function distanciaGoogle(a, b, chave) {
-    const ponto = (c) => ({ waypoint: { location: { latLng: { latitude: c[0], longitude: c[1] } } } });
-    const r = await fetch('https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix', {
+  const GOOGLE_HEADERS = (chave, campos) => ({ 'Content-Type': 'application/json', 'X-Goog-Api-Key': chave, 'X-Goog-FieldMask': campos });
+
+  // Localiza a rodoviária do município pelo Google Places (Text Search) e guarda no navegador.
+  // Sem rodoviária perto da sede, guarda { nenhuma: true } e a rota usa a sede do município.
+  const buscandoRodoviaria = new Map();
+  function localizarRodoviaria(mun, chave) {
+    const n = nomeMunicipio(mun);
+    if (!n || RODOVIARIAS[n] || (state.rodoviarias && state.rodoviarias[n])) return Promise.resolve();
+    if (!buscandoRodoviaria.has(n)) {
+      buscandoRodoviaria.set(n, buscarRodoviaria(n, chave).finally(() => buscandoRodoviaria.delete(n)));
+    }
+    return buscandoRodoviaria.get(n);
+  }
+  async function buscarRodoviaria(n, chave) {
+    const centro = MUN[n];
+    const consulta = n === 'Brasília/DF' ? 'Rodoviária Interestadual de Brasília, DF' : `rodoviária de ${cidade(n)}, Bahia`;
+    const r = await fetch('https://places.googleapis.com/v1/places:searchText', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': chave, 'X-Goog-FieldMask': 'distanceMeters,duration,condition' },
-      body: JSON.stringify({ origins: [ponto(a)], destinations: [ponto(b)], travelMode: 'DRIVE' }),
+      headers: GOOGLE_HEADERS(chave, 'places.id,places.displayName,places.formattedAddress,places.location,places.types'),
+      body: JSON.stringify({ textQuery: consulta, languageCode: 'pt-BR', regionCode: 'BR', pageSize: 8,
+        locationBias: { circle: { center: { latitude: centro[0], longitude: centro[1] }, radius: 25000 } } }),
     });
     const j = await r.json();
-    const el = Array.isArray(j) ? j[0] : null;
-    if (!r.ok || !el || el.condition !== 'ROUTE_EXISTS') throw new Error((j.error && j.error.message) || 'sem rota');
-    return { km: el.distanceMeters / 1000, min: Math.round(parseInt(el.duration, 10) / 60) };
+    if (!r.ok) throw new Error((j.error && j.error.message) || 'Places indisponível');
+    let melhor = null, notaMelhor = -1;
+    for (const p of j.places || []) {
+      const c = [p.location.latitude, p.location.longitude];
+      const d = haversineKm(centro, c);
+      if (d > 25) continue;
+      const nome = norm(p.displayName && p.displayName.text);
+      const tipos = p.types || [];
+      let nota = (tipos.includes('bus_station') ? 4 : 0) + (tipos.includes('transit_station') ? 1 : 0);
+      nota += /rodovi/.test(nome) ? 4 : /terminal/.test(nome) ? 2 : 0;
+      if (nota < 4) continue;
+      nota -= d / 100;
+      if (nota > notaMelhor) { notaMelhor = nota; melhor = { n: p.displayName.text, a: p.formattedAddress || '', c, p: p.id }; }
+    }
+    state.rodoviarias = state.rodoviarias || {};
+    state.rodoviarias[n] = melhor || { nenhuma: true };
+    salvar();
+  }
+
+  // Google Routes API (computeRoutes): de rodoviária a rodoviária (ou sede, quando não há rodoviária localizada)
+  async function distanciaGoogle(origem, comarca, chave) {
+    const ponto = (mun) => {
+      const r = rodoviaria(mun);
+      if (r && r.p) return { placeId: r.p };
+      const c = pontoRota(mun);
+      return { location: { latLng: { latitude: c[0], longitude: c[1] } } };
+    };
+    const r = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
+      method: 'POST',
+      headers: GOOGLE_HEADERS(chave, 'routes.distanceMeters,routes.duration'),
+      body: JSON.stringify({ origin: ponto(origem), destination: ponto(comarca), travelMode: 'DRIVE', languageCode: 'pt-BR', regionCode: 'BR' }),
+    });
+    const j = await r.json();
+    const rt = j.routes && j.routes[0];
+    if (!r.ok || !rt) throw new Error((j.error && j.error.message) || 'sem rota');
+    return { km: rt.distanceMeters / 1000, min: Math.round(parseInt(rt.duration, 10) / 60) };
   }
 
   async function distanciaOSRM(a, b) {
@@ -143,14 +197,17 @@
   }
 
   async function calcularDistancia(origem, comarca) {
-    const a = pontoRota(origem), b = pontoRota(comarca);
     if (nomeMunicipio(origem) && nomeMunicipio(origem) === nomeMunicipio(comarca)) return { km: 0, min: 0, fonte: 'mesma cidade' };
-    if (!a || !b) return null;
+    if (!coords(origem) || !coords(comarca)) return null;
     const chave = state.config.googleKey;
     if (chave) {
-      try { return { ...(await distanciaGoogle(a, b, chave)), fonte: 'Google Maps' }; }
+      for (const mun of [origem, comarca]) {
+        try { await localizarRodoviaria(mun, chave); } catch (e) { console.warn('Places falhou:', e); }
+      }
+      try { return { ...(await distanciaGoogle(origem, comarca, chave)), fonte: 'Google Maps' }; }
       catch (e) { console.warn('Google Maps falhou:', e); }
     }
+    const a = pontoRota(origem), b = pontoRota(comarca);
     try { return { ...(await distanciaOSRM(a, b)), fonte: 'rota OpenStreetMap' }; }
     catch (e) { console.warn('OSRM falhou:', e); }
     return { km: haversineKm(a, b) * 1.3, min: null, fonte: 'estimativa (linha reta × 1,3)' };
@@ -181,7 +238,10 @@
     if (!origem || !comarca) return;
     const k = chaveDist(origem, comarca);
     if (distanciaTabela(origem, comarca) || (nomeMunicipio(origem) && nomeMunicipio(origem) === nomeMunicipio(comarca))) return;
-    if ((!forcar && state.distancias[k]) || emCalculo.has(k)) return;
+    const salvo = state.distancias[k];
+    // com chave do Google, refaz o que antes foi só estimado ou calculado pelo OpenStreetMap
+    const refazer = forcar || !salvo || (state.config.googleKey && salvo.fonte !== 'Google Maps');
+    if (!refazer || emCalculo.has(k)) return;
     emCalculo.add(k);
     render();
     try {
@@ -201,6 +261,7 @@
       defensores: (window.DEFENSORES_INICIAIS || []).map(([nome, origem]) => ({ id: uid(), nome, origem, ingresso: '', historico: 0, ativo: true })),
       juris: [],
       distancias: {},
+      rodoviarias: {},
       config: { googleKey: '' },
     };
   }
@@ -211,6 +272,7 @@
         const s = JSON.parse(raw);
         if (s && Array.isArray(s.defensores) && Array.isArray(s.juris)) {
           s.distancias = s.distancias || {};
+          s.rodoviarias = s.rodoviarias || {};
           s.config = s.config || { googleKey: '' };
           return s;
         }
@@ -735,7 +797,7 @@
             <input id="cfg-google" class="mono" placeholder="AIza…" value="${esc(state.config.googleKey)}"></div>
           <button class="btn primary" type="submit">Salvar chave</button>
         </form>
-        <p class="small muted">Com a chave, a quilometragem vem do próprio Google Maps (Routes API). No Google Cloud, a chave precisa ter a “Routes API” ativada e permitir o endereço deste site. Trajetos que já estão na tabela pré-calculada do Google não gastam consultas.</p>
+        <p class="small muted">Com a chave, o site localiza a rodoviária de cada cidade (Google Places) e calcula a rota de carro de rodoviária a rodoviária (Google Routes). Cada rota é calculada uma vez e fica guardada; rodoviárias e trajetos já conhecidos não gastam consultas. A chave de demonstração do Google funciona, com limite diário de consultas.</p>
         <div class="inline-form"><span class="small muted">${nDist} trajeto(s) já calculado(s) e guardado(s).</span>
           <button class="btn sm" data-action="limpar-distancias"${nDist ? '' : ' disabled'}>Apagar distâncias calculadas</button></div>
       </div>
@@ -981,7 +1043,7 @@
         try {
           const s = JSON.parse(fr.result);
           if (!s || !Array.isArray(s.defensores) || !Array.isArray(s.juris)) throw new Error('formato');
-          s.distancias = s.distancias || {}; s.config = s.config || { googleKey: '' };
+          s.distancias = s.distancias || {}; s.rodoviarias = s.rodoviarias || {}; s.config = s.config || { googleKey: '' };
           state = s; salvar(); render();
           toast(`Backup restaurado: ${s.defensores.length} defensores e ${s.juris.length} júris.`);
         } catch (e) { toast('Arquivo inválido. Escolha um backup .json gerado por este site.'); }

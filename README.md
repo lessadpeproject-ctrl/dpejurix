@@ -28,7 +28,7 @@ Os dados ficam guardados **no navegador** de quem usa. Em **Configurações** h�
 
 - Toda rota sai da **rodoviária** da cidade de origem do defensor e chega à **rodoviária** do município do júri. `js/rodoviarias.js` guarda a localização de cada rodoviária (Google Places), gerada por `tools/localizar_rodoviarias.py`; município sem rodoviária localizada usa a sede.
 - A tabela `js/distancias.js` guarda as distâncias de carro calculadas pelo Google Maps (Routes API) de rodoviária a rodoviária. Ela é gerada uma vez por `tools/calcular_distancias.py` e não gasta consultas no uso do dia a dia.
-- Para uma origem que não está na tabela: com chave do Google em Configurações, o site consulta a Routes API; sem chave, usa a rota do OpenStreetMap (OSRM); se nada responder, usa uma estimativa (linha reta × 1,3), sinalizada na tabela.
+- Para trajetos que não estão na tabela: com chave do Google em Configurações (a chave de demonstração do Google serve), o site localiza as rodoviárias pelo Places API e calcula a rota pela Routes API (computeRoutes), guardando o resultado no navegador; sem chave, usa a rota do OpenStreetMap (OSRM); se nada responder, usa uma estimativa (linha reta × 1,3), sinalizada na tabela.
 - O campo "km" de cada habilitado substitui qualquer cálculo.
 
 Para gerar ou atualizar as tabelas (a chave precisa ter **Routes API** e **Places API (New)** ativadas e faturamento ligado no Google Cloud):

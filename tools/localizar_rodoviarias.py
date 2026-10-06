@@ -10,7 +10,7 @@ Sem argumentos, localiza os municípios que ainda não estão no arquivo.
 Quando nenhuma rodoviária é encontrada perto da sede, o município fica fora do arquivo
 e o site usa a sede do município. A chave não é gravada em nenhum arquivo.
 """
-import json, math, os, re, sys, unicodedata, urllib.request
+import json, math, os, re, sys, unicodedata, urllib.error, urllib.request
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parent.parent
@@ -75,21 +75,29 @@ def main():
     tabela = ler_js(ARQ, "RODOVIARIAS") if ARQ.exists() else {}
     alvos = sys.argv[1:] or [m for m in mun if m not in tabela]
     sem = []
+
+    def gravar():
+        cab = ARQ.read_text(encoding="utf-8").split("window.RODOVIARIAS", 1)[0]
+        ARQ.write_text(cab + "window.RODOVIARIAS = " + json.dumps(dict(sorted(tabela.items())), ensure_ascii=False, indent=0) + ";\n", encoding="utf-8")
+
     for i, m in enumerate(alvos, 1):
         cidade = m.replace("/DF", "")
         consulta = CONSULTAS_ESPECIAIS.get(m, f"rodoviária de {cidade}, Bahia")
-        achou = escolher(buscar(chave, consulta, mun[m]), mun[m])
-        if not achou:
-            achou = escolher(buscar(chave, f"terminal rodoviário {cidade} BA", mun[m]), mun[m])
+        try:
+            achou = escolher(buscar(chave, consulta, mun[m]), mun[m])
+            if not achou:
+                achou = escolher(buscar(chave, f"terminal rodoviário {cidade} BA", mun[m]), mun[m])
+        except urllib.error.HTTPError as e:
+            print(f"Parado em {m}: HTTP {e.code} {e.read()[:200]!r}")
+            break
         if achou:
             p, c = achou
             tabela[m] = {"n": p["displayName"]["text"], "a": p.get("formattedAddress", ""), "c": [round(c[0], 6), round(c[1], 6)], "p": p["id"]}
         else:
             tabela.pop(m, None); sem.append(m)
         if i % 25 == 0:
-            print(f"{i}/{len(alvos)}…", flush=True)
-    cab = ARQ.read_text(encoding="utf-8").split("window.RODOVIARIAS", 1)[0]
-    ARQ.write_text(cab + "window.RODOVIARIAS = " + json.dumps(dict(sorted(tabela.items())), ensure_ascii=False, indent=0) + ";\n", encoding="utf-8")
+            gravar(); print(f"{i}/{len(alvos)}…", flush=True)
+    gravar()
     print(f"Rodoviárias localizadas: {len(tabela)}. Sem rodoviária encontrada ({len(sem)}): {', '.join(sem)}")
 
 
