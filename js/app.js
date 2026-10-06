@@ -541,7 +541,7 @@
     const d = def && distanciaSalva(def.origem, juri.comarca);
     if (d) return { km: d.km, fonte: d.fonte, min: d.min };
     const a = def && pontoRota(def.origem), b = pontoRota(juri.comarca);
-    if (nuvem.tipo === 'claude' && a && b) return { km: haversineKm(a, b) * 1.3, fonte: 'estimativa (aguardando o Google)', min: null };
+    if (nuvem.tipo === 'claude' && a && b) return { km: haversineKm(a, b) * 1.3, fonte: 'estimativa', min: null };
     return { km: null, fonte: null, min: null };
   }
 
@@ -880,7 +880,7 @@
         Ordem de classificação: <b>1.</b> quem fez o art. 422 neste júri tem prioridade · <b>2.</b> menor distância de rodoviária a rodoviária ·
         <b>3.</b> menos júris realizados · <b>4.</b> menos júris futuros designados · <b>5.</b> maior tempo de DPE (antiguidade).
         Com vagas informadas, os primeiros ocupam o resultado e os demais ficam como suplentes.
-        ${nuvem.tipo === 'claude' && r.ativos.some((l) => l.fonteKm && l.fonteKm.startsWith('estimativa')) ? '<br>Distâncias marcadas como “estimativa” são trocadas pela rota do Google automaticamente, em até cerca de 1 hora. A ordem pode mudar quando isso acontecer.' : ''}
+        ${nuvem.tipo === 'claude' && r.ativos.some((l) => l.fonteKm && l.fonteKm.startsWith('estimativa')) ? '<br>Distâncias marcadas como “estimativa” são aproximadas: confira em “Abrir rota” e digite os km no campo da linha. A ordem é refeita na hora.' : ''}
       </div>
     </section>`;
   }
