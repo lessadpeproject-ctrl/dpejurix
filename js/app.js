@@ -283,10 +283,145 @@
   let state = carregar();
   let persistente = true;
   function salvar() {
+    if (nuvem.estado === 'pronto') { enviarMudancas(); return; }
+    if (nuvem.ativo) return; // aguardando login/carregamento: não grava cópia local
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); persistente = true; }
     catch (e) { persistente = false; console.warn('Não foi possível salvar no navegador', e); }
   }
-  salvar();
+
+  // ------------------------------------------------------------------ nuvem (Firebase, dados compartilhados)
+  // Com js/firebase-config.js preenchido, os dados ficam no Firestore e são compartilhados entre os usuários
+  // autorizados (login com Google). Sem configuração, o site funciona só neste navegador (modo local).
+
+  const FB = window.FIREBASE_CONFIG && window.FIREBASE_CONFIG.apiKey ? window.FIREBASE_CONFIG : null;
+  const nuvem = { ativo: !!FB, estado: FB ? 'carregando' : 'local', usuario: null, erro: '', db: null, sinc: {}, pronto: {}, escutas: [] };
+  const COLECOES = ['defensores', 'juris', 'distancias', 'rodoviarias'];
+  const SDK = 'https://www.gstatic.com/firebasejs/10.12.2/';
+
+  function carregarScript(src) {
+    return new Promise((ok, falha) => {
+      const el = document.createElement('script');
+      el.src = src; el.onload = ok; el.onerror = () => falha(new Error('não foi possível carregar ' + src));
+      document.head.appendChild(el);
+    });
+  }
+  // coleção do estado como { chave: objeto }
+  function itensDe(coll) {
+    const v = state[coll];
+    return Array.isArray(v) ? Object.fromEntries(v.map((x) => [x.id, x])) : (v || {});
+  }
+  const refDoc = (coll, chave) => nuvem.db.collection(coll).doc(encodeURIComponent(chave));
+  const refConfig = () => nuvem.db.collection('config').doc('geral');
+
+  async function iniciarNuvem() {
+    try {
+      for (const f of ['firebase-app-compat.js', 'firebase-auth-compat.js', 'firebase-firestore-compat.js']) await carregarScript(SDK + f);
+      firebase.initializeApp(FB);
+      nuvem.db = firebase.firestore();
+      firebase.auth().onAuthStateChanged((u) => {
+        nuvem.usuario = u;
+        pararEscuta();
+        nuvem.estado = u ? 'conectando' : 'login';
+        if (u) escutar();
+        render();
+      });
+    } catch (e) {
+      // sem acesso ao Firebase (ex.: página aberta dentro do Claude): segue em modo local
+      nuvem.ativo = false; nuvem.estado = 'local'; nuvem.erro = e.message;
+      state = carregar(); render();
+    }
+  }
+
+  function pararEscuta() {
+    nuvem.escutas.forEach((f) => f()); nuvem.escutas = []; nuvem.pronto = {}; nuvem.sinc = {};
+  }
+
+  function falhaEscuta(e) {
+    console.warn('Firestore:', e);
+    nuvem.estado = e.code === 'permission-denied' ? 'negado' : 'erro';
+    nuvem.erro = e.message; render();
+  }
+
+  function escutar() {
+    for (const coll of COLECOES) {
+      nuvem.escutas.push(nuvem.db.collection(coll).onSnapshot((snap) => {
+        const itens = {};
+        snap.forEach((d) => { itens[decodeURIComponent(d.id)] = d.data(); });
+        nuvem.sinc[coll] = Object.fromEntries(Object.entries(itens).map(([k, v]) => [k, JSON.stringify(v)]));
+        state[coll] = Array.isArray(state[coll]) ? Object.values(itens) : itens;
+        nuvem.pronto[coll] = true;
+        aoReceber();
+      }, falhaEscuta));
+    }
+    nuvem.escutas.push(refConfig().onSnapshot((d) => {
+      const cfg = d.exists ? d.data() : {};
+      state.config = { googleKey: '', ...cfg };
+      nuvem.sinc.config = JSON.stringify(state.config);
+      nuvem.pronto.config = true;
+      aoReceber();
+    }, falhaEscuta));
+  }
+
+  function aoReceber() {
+    if (nuvem.estado !== 'pronto') {
+      if (!COLECOES.every((c) => nuvem.pronto[c]) || !nuvem.pronto.config) return;
+      nuvem.estado = 'pronto';
+      // primeira vez: banco vazio recebe a lista inicial de defensores e o que já estava neste navegador
+      if (!state.defensores.length) {
+        const local = carregar();
+        COLECOES.forEach((c) => { state[c] = local[c]; });
+        if (!state.config.googleKey && local.config.googleKey) state.config.googleKey = local.config.googleKey;
+        enviarMudancas();
+        toast('Banco compartilhado iniciado com a lista de defensores.');
+      }
+    }
+    render();
+  }
+
+  // grava no Firestore só os documentos que mudaram desde a última sincronização
+  function enviarMudancas() {
+    const ops = [];
+    for (const coll of COLECOES) {
+      const atual = itensDe(coll), antes = nuvem.sinc[coll] || {}, novo = {};
+      for (const [k, v] of Object.entries(atual)) {
+        const j = JSON.stringify(v);
+        novo[k] = j;
+        if (antes[k] !== j) ops.push((b) => b.set(refDoc(coll, k), JSON.parse(j)));
+      }
+      for (const k of Object.keys(antes)) if (!(k in atual)) ops.push((b) => b.delete(refDoc(coll, k)));
+      nuvem.sinc[coll] = novo;
+    }
+    const cfg = JSON.stringify(state.config || {});
+    if (cfg !== nuvem.sinc.config) { ops.push((b) => b.set(refConfig(), JSON.parse(cfg))); nuvem.sinc.config = cfg; }
+    for (let i = 0; i < ops.length; i += 400) {
+      const lote = nuvem.db.batch();
+      ops.slice(i, i + 400).forEach((op) => op(lote));
+      lote.commit().catch((e) => { console.warn(e); toast('Não foi possível salvar no banco compartilhado: ' + e.message); });
+    }
+  }
+
+  function telaNuvem() {
+    const u = nuvem.usuario;
+    const corpo = {
+      carregando: '<strong>Carregando…</strong>',
+      conectando: '<strong>Carregando os dados compartilhados…</strong>',
+      login: `<strong>Entre para acessar as designações</strong><span>O acesso é restrito às pessoas autorizadas.</span>
+        <button class="btn primary" data-action="login">Entrar com Google</button>`,
+      negado: `<strong>Este e-mail não tem acesso</strong><span>${esc(u && u.email)} não está na lista de pessoas autorizadas. Peça ao responsável para incluí-lo.</span>
+        <button class="btn" data-action="sair">Entrar com outra conta</button>`,
+      erro: `<strong>Não foi possível carregar os dados</strong><span class="small">${esc(nuvem.erro)}</span>
+        <button class="btn" data-action="recarregar">Tentar de novo</button>`,
+    }[nuvem.estado] || '';
+    return `<section class="panel"><div class="empty" style="padding:56px 18px">${corpo}</div></section>`;
+  }
+
+  function renderConta() {
+    const el = $('#conta');
+    if (!el) return;
+    if (!nuvem.ativo) { el.innerHTML = '<span class="conta-modo" title="Os dados ficam só neste navegador">Modo local</span>'; return; }
+    const u = nuvem.usuario;
+    el.innerHTML = u ? `<span class="conta-email" title="Dados compartilhados">${esc(u.email)}</span><button class="conta-sair" data-action="sair">Sair</button>` : '';
+  }
 
   const defById = (id) => state.defensores.find((d) => d.id === id);
   const juriById = (id) => state.juris.find((j) => j.id === id);
@@ -786,6 +921,8 @@
     const confirmarReset = ui.confirmar && ui.confirmar.tipo === 'reset';
     return `
     <div class="page-head"><div><h1>Configurações</h1></div></div>
+    ${nuvem.ativo ? `<div class="notice">Dados compartilhados: você está conectado como <b>${esc(nuvem.usuario && nuvem.usuario.email)}</b>. Tudo o que for registrado aqui, inclusive a chave do Google, vale para todas as pessoas autorizadas.</div>`
+      : `<div class="notice warn">Modo local: os dados ficam só neste navegador.${nuvem.erro ? ' O banco compartilhado não pôde ser carregado nesta página.' : ''}</div>`}
     ${persistente ? '' : '<div class="notice warn">Este navegador não está permitindo salvar dados. Use o backup abaixo para não perder o que foi registrado.</div>'}
 
     <section class="panel">
@@ -849,6 +986,12 @@
     const ativo = document.activeElement;
     const foco = ativo && ativo.id && app.contains(ativo) ? { id: ativo.id, s: ativo.selectionStart, e: ativo.selectionEnd } : null;
     const chaveTela = r.tela + (r.id || '');
+    renderConta();
+    if (nuvem.ativo && nuvem.estado !== 'pronto') {
+      app.innerHTML = telaNuvem();
+      ultimaTela = '';
+      return;
+    }
 
     let html;
     switch (r.tela) {
@@ -917,6 +1060,18 @@
     render();
   });
 
+  function entrar() {
+    const prov = new firebase.auth.GoogleAuthProvider();
+    prov.setCustomParameters({ prompt: 'select_account' });
+    firebase.auth().signInWithPopup(prov).catch((e) => {
+      if (e.code === 'auth/popup-blocked' || e.code === 'auth/operation-not-supported-in-this-environment') firebase.auth().signInWithRedirect(prov);
+      else if (e.code !== 'auth/popup-closed-by-user' && e.code !== 'auth/cancelled-popup-request') toast('Não foi possível entrar: ' + e.message);
+    });
+  }
+  document.getElementById('conta').addEventListener('click', (ev) => {
+    if (ev.target.closest('[data-action="sair"]')) firebase.auth().signOut();
+  });
+
   app.addEventListener('click', (ev) => {
     const alvo = ev.target.closest('[data-action]');
     if (!alvo) {
@@ -969,6 +1124,9 @@
       case 'exportar-csv': baixar(`juris-${isoHoje()}.csv`, csvJuris(), 'text/csv;charset=utf-8'); break;
       case 'pedir-reset': ui.confirmar = { tipo: 'reset' }; render(); break;
       case 'reset': state = estadoInicial(); ui.confirmar = null; salvar(); render(); toast('Dados apagados.'); break;
+      case 'login': entrar(); break;
+      case 'sair': firebase.auth().signOut(); break;
+      case 'recarregar': location.reload(); break;
     }
   });
 
@@ -1111,4 +1269,5 @@
   });
 
   render();
+  if (nuvem.ativo) iniciarNuvem();
 })();

@@ -17,10 +17,46 @@ Substitui a planilha de controle mensal por telas simples:
 
 ## Como usar
 
-Abra `index.html` no navegador, ou publique a pasta no GitHub Pages (Settings → Pages → branch). Não precisa de servidor nem instalação.
+O site é estático (HTML, CSS e JavaScript) e roda no GitHub Pages:
+**Settings → Pages → Deploy from a branch → branch do site, pasta `/ (root)`**.
 
-Os dados ficam guardados **no navegador** de quem usa. Em **Configurações** há:
-- backup (.json) para salvar e levar os dados para outro computador;
+### Dados compartilhados (Firebase)
+
+Com `js/firebase-config.js` preenchido, os dados ficam no Firestore e são os mesmos para todas as
+pessoas autorizadas, que entram com a conta Google. Sem essa configuração o site funciona só no
+navegador de quem usa (modo local).
+
+Configuração (plano gratuito "Spark", sem cartão):
+
+1. Em https://console.firebase.google.com, crie um projeto.
+2. **Firestore Database → Criar banco de dados** (local `southamerica-east1`, modo de produção).
+3. **Firestore → Regras**: cole as regras abaixo com os e-mails autorizados e publique.
+4. **Authentication → Começar → Google → Ativar**. Em **Authentication → Configurações → Domínios autorizados**, adicione `lessadpeproject-ctrl.github.io`.
+5. **Configurações do projeto → Seus apps → Web (`</>`)**: registre o app e copie o objeto `firebaseConfig` para `js/firebase-config.js` (`window.FIREBASE_CONFIG = { ... };`).
+
+```
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function autorizado() {
+      return request.auth != null && request.auth.token.email_verified == true
+        && request.auth.token.email.lower() in [
+          'pessoa1@gmail.com', 'pessoa2@gmail.com', 'pessoa3@gmail.com', 'pessoa4@gmail.com'
+        ];
+    }
+    match /{document=**} {
+      allow read, write: if autorizado();
+    }
+  }
+}
+```
+
+Na primeira entrada, o banco vazio recebe a lista de defensores e o que estava no navegador.
+A chave do Google Maps salva em Configurações também fica no banco (só as pessoas autorizadas
+leem), então basta uma pessoa informá-la.
+
+Em **Configurações** há ainda:
+- backup (.json) e restauração;
 - exportação dos júris para Excel (.csv);
 - campo para a chave da API do Google Maps.
 

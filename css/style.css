@@ -262,3 +262,11 @@ input.mono { font-family: var(--f-mono); font-size: .9rem; }
 .pick-km { grid-area: km; font-size: .8rem; color: var(--muted); white-space: nowrap; }
 .hab-actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
 .hab-actions .check { margin-right: auto; }
+
+/* ---------- conta (topo) ---------- */
+.conta { display: flex; align-items: center; gap: 8px; font-size: .82rem; }
+.conta:empty { display: none; }
+.conta-email { opacity: .9; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conta-modo { opacity: .75; }
+.conta-sair { font: inherit; color: inherit; background: none; border: 1px solid currentColor; border-radius: 999px; padding: 2px 10px; cursor: pointer; opacity: .85; }
+.conta-sair:hover { opacity: 1; }
