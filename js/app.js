@@ -104,37 +104,18 @@
     return 'https://www.google.com/maps/dir/?' + p.toString();
   }
 
-  let googlePromise = null;
-  function carregarGoogle(chave) {
-    if (window.google && window.google.maps && window.google.maps.DistanceMatrixService) return Promise.resolve();
-    if (googlePromise) return googlePromise;
-    googlePromise = new Promise((resolve, reject) => {
-      window.__gmPronto = () => resolve();
-      const s = document.createElement('script');
-      s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(chave)}&callback=__gmPronto&loading=async`;
-      s.async = true;
-      s.onerror = () => { googlePromise = null; reject(new Error('Não foi possível carregar o Google Maps.')); };
-      document.head.appendChild(s);
-      setTimeout(() => reject(new Error('Google Maps não respondeu.')), 15000);
+  // Google Routes API (computeRouteMatrix) — ponto de partida e destino pelas coordenadas da sede do município
+  async function distanciaGoogle(a, b, chave) {
+    const ponto = (c) => ({ waypoint: { location: { latLng: { latitude: c[0], longitude: c[1] } } } });
+    const r = await fetch('https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': chave, 'X-Goog-FieldMask': 'distanceMeters,duration,condition' },
+      body: JSON.stringify({ origins: [ponto(a)], destinations: [ponto(b)], travelMode: 'DRIVE' }),
     });
-    return googlePromise;
-  }
-
-  async function distanciaGoogle(origem, comarca, chave) {
-    await carregarGoogle(chave);
-    const svc = new google.maps.DistanceMatrixService();
-    const tentar = (destino) => new Promise((resolve, reject) => {
-      svc.getDistanceMatrix({
-        origins: [enderecoOrigem(origem)], destinations: [destino],
-        travelMode: google.maps.TravelMode.DRIVING, unitSystem: google.maps.UnitSystem.METRIC, region: 'br',
-      }, (res, status) => {
-        const el = res && res.rows && res.rows[0] && res.rows[0].elements[0];
-        if (status === 'OK' && el && el.status === 'OK') resolve({ km: el.distance.value / 1000, min: Math.round(el.duration.value / 60) });
-        else reject(new Error(status + (el ? ' / ' + el.status : '')));
-      });
-    });
-    try { return await tentar(enderecoDestino(comarca)); }
-    catch (e) { return await tentar(`${comarca}, BA`); }
+    const j = await r.json();
+    const el = Array.isArray(j) ? j[0] : null;
+    if (!r.ok || !el || el.condition !== 'ROUTE_EXISTS') throw new Error((j.error && j.error.message) || 'sem rota');
+    return { km: el.distanceMeters / 1000, min: Math.round(parseInt(el.duration, 10) / 60) };
   }
 
   async function distanciaOSRM(a, b) {
@@ -152,12 +133,12 @@
   async function calcularDistancia(origem, comarca) {
     const a = coords(origem), b = coords(comarca);
     if (nomeMunicipio(origem) && nomeMunicipio(origem) === nomeMunicipio(comarca)) return { km: 0, min: 0, fonte: 'mesma cidade' };
+    if (!a || !b) return null;
     const chave = state.config.googleKey;
     if (chave) {
-      try { return { ...(await distanciaGoogle(origem, comarca, chave)), fonte: 'Google Maps' }; }
+      try { return { ...(await distanciaGoogle(a, b, chave)), fonte: 'Google Maps' }; }
       catch (e) { console.warn('Google Maps falhou:', e); }
     }
-    if (!a || !b) return null;
     try { return { ...(await distanciaOSRM(a, b)), fonte: 'rota OpenStreetMap' }; }
     catch (e) { console.warn('OSRM falhou:', e); }
     return { km: haversineKm(a, b) * 1.3, min: null, fonte: 'estimativa (linha reta × 1,3)' };
@@ -165,11 +146,29 @@
 
   const chaveDist = (o, c) => `${nomeMunicipio(o) || o}|${nomeMunicipio(c) || c}`;
   const emCalculo = new Set();
-  function distanciaSalva(origem, comarca) { return state.distancias[chaveDist(origem, comarca)] || null; }
+  // Tabela pré-calculada pelo Google (js/distancias.js) tem prioridade sobre o que foi calculado no navegador.
+  function distanciaTabela(origem, comarca) {
+    const t = window.DISTANCIAS || {};
+    const linha = t[nomeMunicipio(origem)];
+    const v = linha && linha[nomeMunicipio(comarca)];
+    return v ? { km: v[0], min: v[1], fonte: 'Google Maps' } : null;
+  }
+  function distanciaSalva(origem, comarca) {
+    if (nomeMunicipio(origem) && nomeMunicipio(origem) === nomeMunicipio(comarca)) return { km: 0, min: 0, fonte: 'mesma cidade' };
+    return distanciaTabela(origem, comarca) || state.distancias[chaveDist(origem, comarca)] || null;
+  }
+  // Distância para mostrar na lista de seleção (tabela, cálculo salvo ou estimativa).
+  function kmPrevia(origem, comarca) {
+    const d = distanciaSalva(origem, comarca);
+    if (d) return d.km;
+    const a = coords(origem), b = coords(comarca);
+    return a && b ? haversineKm(a, b) * 1.3 : null;
+  }
 
   async function garantirDistancia(origem, comarca, forcar = false) {
     if (!origem || !comarca) return;
     const k = chaveDist(origem, comarca);
+    if (distanciaTabela(origem, comarca) || (nomeMunicipio(origem) && nomeMunicipio(origem) === nomeMunicipio(comarca))) return;
     if ((!forcar && state.distancias[k]) || emCalculo.has(k)) return;
     emCalculo.add(k);
     render();
@@ -297,6 +296,7 @@
     defBusca: '', defOrdem: { chave: 'nome', dir: 1 },
     jurisFiltro: 'todos', jurisBusca: '',
     confirmar: null, // { tipo, id }
+    habBusca: '', habSel: new Set(), habData: '', hab422: false,
   };
 
   function rota() {
@@ -566,14 +566,7 @@
         </div>
       </div>
       <div class="panel-body">
-        <form id="form-hab" class="inline-form" autocomplete="off">
-          <div class="field grow"><label for="hab-def">Habilitar defensor</label>
-            <input id="hab-def" list="dl-defensores" placeholder="${disponiveis.length ? 'Digite o nome' : 'Todos os defensores ativos já estão habilitados'}"${disponiveis.length ? '' : ' disabled'}>
-            <datalist id="dl-defensores">${disponiveis.map((d) => `<option value="${esc(d.nome)}">${esc(d.origem)}</option>`).join('')}</datalist></div>
-          <div class="field"><label for="hab-data">Habilitado em</label><input id="hab-data" type="date" value="${isoHoje()}"></div>
-          <label class="check" style="min-height:40px"><input id="hab-422" type="checkbox">Fez o art. 422</label>
-          <button class="btn primary" type="submit"${disponiveis.length ? '' : ' disabled'}>Habilitar</button>
-        </form>
+        ${formHabilitar(j, disponiveis)}
         ${r.empateNaVaga ? '<div class="notice warn">Há empate na última vaga. O critério de antiguidade só desempata quando a data de ingresso na DPE dos defensores empatados estiver preenchida.</div>' : ''}
         ${!nomeMunicipio(j.comarca) && j.habilitacoes.length ? '<div class="notice warn">A comarca não foi reconhecida como município da Bahia. Informe a quilometragem manualmente (campo “km” na coluna Distância) usando o link “Abrir rota”.</div>' : ''}
       </div>
@@ -588,6 +581,35 @@
         Com vagas informadas, os primeiros ocupam o resultado e os demais ficam como suplentes.
       </div>
     </section>`;
+  }
+
+  function formHabilitar(j, disponiveis) {
+    if (!disponiveis.length) return '<p class="muted">Todos os defensores ativos já estão habilitados neste júri.</p>';
+    const busca = norm(ui.habBusca);
+    const visiveis = disponiveis.filter((d) => !busca || norm(d.nome).includes(busca) || norm(d.origem).includes(busca));
+    const nSel = disponiveis.filter((d) => ui.habSel.has(d.id)).length;
+    return `<form id="form-hab" class="hab-form" autocomplete="off">
+      <div class="hab-top">
+        <div class="field grow"><label for="hab-busca">Habilitar defensores <span class="muted">(marque um ou vários)</span></label>
+          <input id="hab-busca" type="search" placeholder="Filtrar por nome ou cidade" value="${esc(ui.habBusca)}"></div>
+        <div class="field"><label for="hab-data">Habilitado em</label><input id="hab-data" type="date" value="${esc(ui.habData || isoHoje())}"></div>
+      </div>
+      <div class="pick-list" role="group" aria-label="Defensores disponíveis">
+        ${visiveis.length ? visiveis.map((d) => {
+          const km = kmPrevia(d.origem, j.comarca);
+          return `<label class="pick${ui.habSel.has(d.id) ? ' on' : ''}">
+            <input type="checkbox" id="sel-${d.id}" data-action="sel-hab" data-def="${d.id}"${ui.habSel.has(d.id) ? ' checked' : ''}>
+            <span class="pick-name">${esc(d.nome)}</span>
+            <span class="pick-city">${esc(d.origem)}</span>
+            <span class="pick-km num">${km != null ? '≈ ' + fmtKm(km) : ''}</span>
+          </label>`; }).join('') : '<p class="muted small" style="padding:10px 12px">Nenhum defensor encontrado com esse filtro.</p>'}
+      </div>
+      <div class="hab-actions">
+        <label class="check"><input id="hab-422" type="checkbox"${ui.hab422 ? ' checked' : ''}>Fez o art. 422 (vale para os marcados)</label>
+        ${nSel ? '<button class="btn sm link" type="button" data-action="limpar-sel">Desmarcar todos</button>' : ''}
+        <button class="btn primary" type="submit"${nSel ? '' : ' disabled'}>Habilitar ${nSel ? nSel + ' selecionado(s)' : ''}</button>
+      </div>
+    </form>`;
   }
 
   function telaDefensores() {
@@ -701,7 +723,7 @@
             <input id="cfg-google" class="mono" placeholder="AIza…" value="${esc(state.config.googleKey)}"></div>
           <button class="btn primary" type="submit">Salvar chave</button>
         </form>
-        <p class="small muted">Com a chave, a quilometragem vem do próprio Google Maps (Distance Matrix). A chave precisa ter a “Maps JavaScript API” ativada e permitir o endereço deste site.</p>
+        <p class="small muted">Com a chave, a quilometragem vem do próprio Google Maps (Routes API). No Google Cloud, a chave precisa ter a “Routes API” ativada e permitir o endereço deste site. Trajetos que já estão na tabela pré-calculada do Google não gastam consultas.</p>
         <div class="inline-form"><span class="small muted">${nDist} trajeto(s) já calculado(s) e guardado(s).</span>
           <button class="btn sm" data-action="limpar-distancias"${nDist ? '' : ' disabled'}>Apagar distâncias calculadas</button></div>
       </div>
@@ -816,7 +838,10 @@
 
   // ------------------------------------------------------------------ eventos
 
-  window.addEventListener('hashchange', () => { ui.confirmar = null; render(); });
+  window.addEventListener('hashchange', () => {
+    ui.confirmar = null; ui.habBusca = ''; ui.habSel = new Set(); ui.habData = ''; ui.hab422 = false;
+    render();
+  });
 
   app.addEventListener('click', (ev) => {
     const alvo = ev.target.closest('[data-action]');
@@ -864,6 +889,7 @@
         state.juris.forEach((x) => { x.habilitacoes = x.habilitacoes.filter((h) => h.defensorId !== r.id); });
         ui.confirmar = null; salvar(); location.hash = '#defensores'; toast('Defensor excluído.'); break;
       case 'cancelar-confirmacao': ui.confirmar = null; render(); break;
+      case 'limpar-sel': ui.habSel = new Set(); render(); break;
       case 'limpar-distancias': state.distancias = {}; salvar(); render(); toast('Distâncias apagadas. Elas serão recalculadas ao abrir cada júri.'); break;
       case 'exportar-json': baixar(`dpejurix-backup-${isoHoje()}.json`, JSON.stringify(state, null, 2), 'application/json'); break;
       case 'exportar-csv': baixar(`juris-${isoHoje()}.csv`, csvJuris(), 'text/csv;charset=utf-8'); break;
@@ -876,6 +902,7 @@
     const el = ev.target;
     if (el.id === 'def-busca') { ui.defBusca = el.value; render(); }
     else if (el.id === 'juris-busca') { ui.jurisBusca = el.value; render(); }
+    else if (el.id === 'hab-busca') { ui.habBusca = el.value; render(); }
     else if (el.id === 'j-processo') {
       const pos = el.value.length - el.selectionStart;
       el.value = mascaraCNJ(el.value);
@@ -886,6 +913,14 @@
   app.addEventListener('change', (ev) => {
     const el = ev.target;
     const r = rota();
+
+    // seleção de defensores para habilitar
+    if (el.dataset.action === 'sel-hab') {
+      if (el.checked) ui.habSel.add(el.dataset.def); else ui.habSel.delete(el.dataset.def);
+      render(); return;
+    }
+    if (el.id === 'hab-422') { ui.hab422 = el.checked; return; }
+    if (el.id === 'hab-data') { ui.habData = el.value; return; }
 
     // checkboxes e km da tabela de habilitados
     if (el.dataset.action && r.tela === 'juri') {
@@ -973,15 +1008,15 @@
 
     if (f.id === 'form-hab') {
       const j = juriById(rota().id);
-      const nome = $('#hab-def').value;
-      const def = state.defensores.find((d) => norm(d.nome) === norm(nome));
-      if (!def) { toast('Escolha um defensor da lista.'); return; }
-      if (j.habilitacoes.some((h) => h.defensorId === def.id)) { toast('Este defensor já está habilitado neste júri.'); return; }
-      j.habilitacoes.push({ defensorId: def.id, habilitadoEm: $('#hab-data').value || isoHoje(), art422: $('#hab-422').checked, kmManual: null, designado: false, desistiu: false });
+      const ja = new Set(j.habilitacoes.map((h) => h.defensorId));
+      const novos = [...ui.habSel].map(defById).filter((d) => d && !ja.has(d.id));
+      if (!novos.length) { toast('Marque pelo menos um defensor na lista.'); return; }
+      const data = $('#hab-data').value || isoHoje(), art422 = $('#hab-422').checked;
+      novos.forEach((d) => j.habilitacoes.push({ defensorId: d.id, habilitadoEm: data, art422, kmManual: null, designado: false, desistiu: false }));
+      ui.habSel = new Set(); ui.habBusca = ''; ui.hab422 = false;
       salvar(); render();
-      garantirDistancia(def.origem, j.comarca);
-      toast(`${primeiroNome(def.nome)} habilitado(a).`);
-      const campo = $('#hab-def'); if (campo) campo.focus();
+      novos.forEach((d) => garantirDistancia(d.origem, j.comarca));
+      toast(novos.length === 1 ? `${primeiroNome(novos[0].nome)} habilitado(a).` : `${novos.length} defensores habilitados.`);
       return;
     }
 
@@ -996,7 +1031,6 @@
 
     if (f.id === 'form-google') {
       state.config.googleKey = $('#cfg-google').value.trim();
-      googlePromise = null;
       salvar(); render();
       toast(state.config.googleKey ? 'Chave salva. Use “Recalcular distâncias” nos júris já registrados.' : 'Chave removida.');
     }

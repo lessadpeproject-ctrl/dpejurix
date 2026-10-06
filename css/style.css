@@ -240,3 +240,25 @@ input.mono { font-family: var(--f-mono); font-size: .9rem; }
 @media (prefers-reduced-motion: no-preference) {
   .btn, .tabs a, .chip-btn, tr.clickable td { transition: background-color .15s, color .15s, border-color .15s; }
 }
+
+/* ---------- seleção de defensores para habilitar ---------- */
+.hab-form { display: grid; gap: 12px; }
+.hab-top { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+.hab-top .grow { flex: 1 1 260px; min-width: 0; }
+.pick-list {
+  border: 1px solid var(--line); border-radius: 8px; max-height: 340px; overflow-y: auto;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+}
+.pick {
+  display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; grid-template-areas: "box name km" "box city km";
+  column-gap: 10px; align-items: center; padding: 8px 12px; cursor: pointer;
+  border-bottom: 1px solid var(--line); border-right: 1px solid var(--line);
+}
+.pick:hover { background: var(--surface-2); }
+.pick.on { background: var(--accent-soft); }
+.pick input { grid-area: box; width: 18px; height: 18px; min-height: 0; margin: 0; accent-color: var(--accent); }
+.pick-name { grid-area: name; font-weight: 600; font-size: .9rem; color: var(--ink); }
+.pick-city { grid-area: city; font-size: .8rem; color: var(--muted); }
+.pick-km { grid-area: km; font-size: .8rem; color: var(--muted); white-space: nowrap; }
+.hab-actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+.hab-actions .check { margin-right: auto; }

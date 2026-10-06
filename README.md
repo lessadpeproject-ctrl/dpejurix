@@ -4,7 +4,7 @@ Microsite para organizar os júris, as habilitações dos defensores e a ordem d
 Substitui a planilha de controle mensal por telas simples:
 
 - **Painel**: total de júris realizados, em andamento e concluídos. Abaixo, todos os defensores com júris realizados, júris futuros e tempo de DPE. Clique no nome para abrir o perfil.
-- **Júris**: registre o número do processo, a comarca, o número SEI (e SEI complementar), a data, as vagas e a situação. Depois habilite os defensores inscritos.
+- **Júris**: registre o número do processo, a comarca, o número SEI (e SEI complementar), a data, as vagas e a situação. Depois habilite os defensores inscritos: a lista mostra nome, cidade e distância aproximada, e dá para marcar vários de uma vez.
 - **Habilitação**: para cada defensor habilitado o site calcula a distância da cidade de origem até a rodoviária da comarca, mostra o link da rota no Google Maps e classifica automaticamente:
   1. quem fez o **art. 422** naquele júri tem prioridade;
   2. menor distância;
@@ -26,10 +26,16 @@ Os dados ficam guardados **no navegador** de quem usa. Em **Configurações** h�
 
 ## Distâncias
 
-- Com chave do Google Maps (Maps JavaScript API), a quilometragem vem do Google.
-- Sem chave, o site calcula a rota de carro pelo OpenStreetMap (OSRM).
-- Se nenhum dos dois responder, usa uma estimativa (linha reta × 1,3), sinalizada na tabela.
-- Distâncias calculadas ficam guardadas por par origem → comarca.
+- A tabela `js/distancias.js` guarda as distâncias de carro calculadas pelo Google Maps (Routes API) de cada cidade de origem até todos os municípios da Bahia. Ela é gerada uma vez por `tools/calcular_distancias.py` e não gasta consultas no uso do dia a dia.
+- Para uma origem que não está na tabela: com chave do Google em Configurações, o site consulta a Routes API; sem chave, usa a rota do OpenStreetMap (OSRM); se nada responder, usa uma estimativa (linha reta × 1,3), sinalizada na tabela.
+- O campo "km" de cada habilitado substitui qualquer cálculo.
+
+Para gerar ou atualizar a tabela (a chave precisa ter a **Routes API** ativada no Google Cloud):
+
+```
+GOOGLE_MAPS_KEY=sua-chave python3 tools/calcular_distancias.py            # origens novas
+GOOGLE_MAPS_KEY=sua-chave python3 tools/calcular_distancias.py Salvador   # recalcula uma origem
+```
 
 ## Dados iniciais
 
