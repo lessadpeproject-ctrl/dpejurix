@@ -97,10 +97,22 @@
     return 2 * R * Math.asin(Math.sqrt(h));
   }
 
-  const enderecoOrigem = (o) => (o === 'Brasília/DF' ? 'Brasília, DF' : `${o}, BA`);
-  const enderecoDestino = (c) => `Rodoviária de ${c}, BA`;
+  // Rodoviária de cada município (js/rodoviarias.js): { n: nome, a: endereço, c: [lat, lng], p: place_id }.
+  // As rotas saem da rodoviária da cidade do defensor e chegam à rodoviária da comarca.
+  const RODOVIARIAS = window.RODOVIARIAS || {};
+  const rodoviaria = (mun) => RODOVIARIAS[nomeMunicipio(mun)] || null;
+  const uf = (mun) => (nomeMunicipio(mun) === 'Brasília/DF' ? 'DF' : 'BA');
+  const cidade = (mun) => (nomeMunicipio(mun) || mun).replace('/DF', '');
+  // Ponto usado no cálculo: rodoviária localizada ou, se não houver, a sede do município.
+  const pontoRota = (mun) => { const r = rodoviaria(mun); return r ? r.c : coords(mun); };
+  const nomeTerminal = (mun) => { const r = rodoviaria(mun); return r ? r.n : `Rodoviária de ${cidade(mun)}`; };
   function mapsUrl(origem, comarca) {
-    const p = new URLSearchParams({ api: '1', origin: enderecoOrigem(origem), destination: enderecoDestino(comarca), travelmode: 'driving' });
+    const ro = rodoviaria(origem), rd = rodoviaria(comarca);
+    const p = new URLSearchParams({ api: '1', travelmode: 'driving' });
+    p.set('origin', ro ? `${ro.c[0]},${ro.c[1]}` : `Rodoviária de ${cidade(origem)}, ${uf(origem)}`);
+    if (ro && ro.p) p.set('origin_place_id', ro.p);
+    p.set('destination', rd ? `${rd.c[0]},${rd.c[1]}` : `Rodoviária de ${cidade(comarca)}, ${uf(comarca)}`);
+    if (rd && rd.p) p.set('destination_place_id', rd.p);
     return 'https://www.google.com/maps/dir/?' + p.toString();
   }
 
@@ -131,7 +143,7 @@
   }
 
   async function calcularDistancia(origem, comarca) {
-    const a = coords(origem), b = coords(comarca);
+    const a = pontoRota(origem), b = pontoRota(comarca);
     if (nomeMunicipio(origem) && nomeMunicipio(origem) === nomeMunicipio(comarca)) return { km: 0, min: 0, fonte: 'mesma cidade' };
     if (!a || !b) return null;
     const chave = state.config.googleKey;
@@ -161,7 +173,7 @@
   function kmPrevia(origem, comarca) {
     const d = distanciaSalva(origem, comarca);
     if (d) return d.km;
-    const a = coords(origem), b = coords(comarca);
+    const a = pontoRota(origem), b = pontoRota(comarca);
     return a && b ? haversineKm(a, b) * 1.3 : null;
   }
 
@@ -519,7 +531,7 @@
       return `<tr class="${l.h.desistiu ? 'is-out' : ''}">
         <td class="c">${l.h.desistiu ? '—' : `<span class="pos${l.dentro ? ' in' : ''}">${l.pos}</span>`}</td>
         <td style="min-width:200px"><a class="name" href="#defensor-${l.def.id}">${esc(l.def.nome)}</a>
-          <div class="small muted">sai de ${esc(l.def.origem)}${l.empate && !l.h.desistiu ? ' · <span style="color:var(--warn);font-weight:600">empate</span>' : ''}</div></td>
+          <div class="small muted" title="${esc(nomeTerminal(l.def.origem))}">sai da rodoviária de ${esc(cidade(l.def.origem))}${l.empate && !l.h.desistiu ? ' · <span style="color:var(--warn);font-weight:600">empate</span>' : ''}</div></td>
         <td class="c"><label class="check" title="Fez o art. 422 neste júri"><input type="checkbox" data-action="h-422" data-def="${l.def.id}"${l.h.art422 ? ' checked' : ''}${l.h.desistiu ? ' disabled' : ''}>${l.h.art422 ? '<span class="pill gold">prioridade</span>' : ''}</label></td>
         <td style="white-space:nowrap">
           ${emCalculo.has(k) && !kmManual ? '<span class="muted small">calculando…</span>' : `<span class="big-num">${fmtKm(l.km)}</span>`}
@@ -576,7 +588,7 @@
         <tbody>${r.ativos.map(linha).join('')}${r.desistentes.map(linha).join('')}</tbody></table></div>`
       : `<div class="empty"><strong>Nenhum defensor habilitado</strong><span>Use o campo acima para habilitar quem se inscreveu neste júri.</span></div>`}
       <div class="panel-note">
-        Ordem de classificação: <b>1.</b> quem fez o art. 422 neste júri tem prioridade · <b>2.</b> menor distância até a rodoviária da comarca ·
+        Ordem de classificação: <b>1.</b> quem fez o art. 422 neste júri tem prioridade · <b>2.</b> menor distância de rodoviária a rodoviária ·
         <b>3.</b> menos júris realizados · <b>4.</b> menos júris futuros designados · <b>5.</b> maior tempo de DPE (antiguidade).
         Com vagas informadas, os primeiros ocupam o resultado e os demais ficam como suplentes.
       </div>
@@ -659,7 +671,7 @@
         <div class="avatar" aria-hidden="true">${esc(iniciais(d.nome).toUpperCase())}</div>
         <div style="display:grid;gap:4px;min-width:0">
           <h1>${esc(d.nome)}</h1>
-          <div class="meta"><span>Origem <b>${esc(d.origem)}</b></span><span>Tempo de DPE <b>${t ? esc(t.texto) : 'aguardando data de ingresso'}</b></span>
+          <div class="meta"><span>Origem <b>${esc(d.origem)}</b> · sai de ${esc(nomeTerminal(d.origem))}</span><span>Tempo de DPE <b>${t ? esc(t.texto) : 'aguardando data de ingresso'}</b></span>
             ${d.ativo === false ? '<span class="pill">Inativo</span>' : ''}</div>
         </div>
       </div>
@@ -717,7 +729,7 @@
     <section class="panel">
       <div class="panel-head"><h2>Cálculo de distância</h2></div>
       <div class="panel-body">
-        <p>O destino de cada rota é a rodoviária do município do júri. Sem chave do Google, o site calcula a rota de carro pelo OpenStreetMap; se ele não responder, usa uma estimativa (linha reta × 1,3). Cada linha tem o link “Abrir rota” no Google Maps, e o campo “km” de cada defensor substitui qualquer cálculo.</p>
+        <p>Cada rota sai da rodoviária da cidade de origem do defensor e chega à rodoviária do município do júri. Sem chave do Google, o site calcula a rota de carro pelo OpenStreetMap; se ele não responder, usa uma estimativa (linha reta × 1,3). Cada linha tem o link “Abrir rota” no Google Maps, e o campo “km” de cada defensor substitui qualquer cálculo.</p>
         <form id="form-google" class="inline-form" autocomplete="off">
           <div class="field grow"><label for="cfg-google">Chave da API do Google Maps (opcional)</label>
             <input id="cfg-google" class="mono" placeholder="AIza…" value="${esc(state.config.googleKey)}"></div>
@@ -747,7 +759,7 @@
       <div class="panel-body">
         <ol class="criteria">
           <li><b>Art. 422</b>: quem fez o art. 422 naquele júri fica à frente.</li>
-          <li><b>Distância</b>: menor quilometragem da cidade de origem até a rodoviária da comarca.</li>
+          <li><b>Distância</b>: menor quilometragem da rodoviária da cidade de origem até a rodoviária da comarca.</li>
           <li><b>Júris realizados</b>: em distâncias iguais, quem tem menos júris realizados.</li>
           <li><b>Júris futuros</b>: persistindo o empate, quem tem menos designações futuras.</li>
           <li><b>Antiguidade</b>: maior tempo de DPE, quando a data de ingresso estiver preenchida.</li>

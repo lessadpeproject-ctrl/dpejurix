@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Gera js/distancias.js com a distância de carro (Google Routes API) de cada cidade de
-origem dos defensores até todos os municípios da Bahia.
+Gera js/distancias.js com a distância de carro (Google Routes API) da rodoviária de cada
+cidade de origem dos defensores até a rodoviária de todos os municípios da Bahia.
+Usa js/rodoviarias.js (gerado por tools/localizar_rodoviarias.py); município sem rodoviária
+localizada usa a sede do município.
 
 Uso:
     GOOGLE_MAPS_KEY=AIza... python3 tools/calcular_distancias.py [Origem ...]
@@ -43,6 +45,9 @@ def main():
     if not chave:
         sys.exit("Defina GOOGLE_MAPS_KEY.")
     mun = ler_js("js/municipios.js", "MUNICIPIOS")
+    rod = ler_js("js/rodoviarias.js", "RODOVIARIAS") if (RAIZ / "js" / "rodoviarias.js").exists() else {}
+    for m, r in rod.items():
+        mun[m] = r["c"]
     tabela = ler_js("js/distancias.js", "DISTANCIAS") if ARQ.exists() else {}
     origens = sys.argv[1:] or sorted(set(ler_js("js/defensores-iniciais.js", "DEFENSORES_INICIAIS")) - set(tabela))
     nomes = [n for n in mun if n != "Brasília/DF"]
