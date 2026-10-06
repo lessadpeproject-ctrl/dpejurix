@@ -1,0 +1,10 @@
+# Site estático: publica a raiz do repositório, sem etapa de build.
+[build]
+  publish = "."
+  command = ""
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "strict-origin-when-cross-origin"

@@ -122,31 +122,50 @@
     return 'https://www.google.com/maps/dir/?' + p.toString();
   }
 
-  // Google Routes API (computeRouteMatrix) — ponto de partida e destino pelas coordenadas da sede do município
-  const GOOGLE_HEADERS = (chave, campos) => ({ 'Content-Type': 'application/json', 'X-Goog-Api-Key': chave, 'X-Goog-FieldMask': campos });
+  // ---- Google: rodízio de chaves
+  // As chaves ficam em Configurações (salvas no banco compartilhado). Cada API (places, routes) usa a
+  // primeira chave que funciona; quando uma é recusada ou esgota a cota do dia, passa para a próxima.
+  function chavesGoogle() {
+    const cfg = state.config || {};
+    return [...new Set([...(cfg.googleKeys || []), cfg.googleKey].map((c) => (c || '').trim()).filter(Boolean))];
+  }
+  const chaveAtual = {};
+  async function googlePost(api, url, campos, corpo) {
+    const chaves = chavesGoogle();
+    if (!chaves.length) throw new Error('nenhuma chave do Google configurada');
+    for (let i = chaveAtual[api] || 0; i < chaves.length; i++) {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': chaves[i], 'X-Goog-FieldMask': campos },
+        body: JSON.stringify(corpo),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok) { chaveAtual[api] = i; return j; }
+      if (r.status !== 403 && r.status !== 429) throw new Error((j.error && j.error.message) || 'erro ' + r.status);
+      console.warn(`Chave ${i + 1} recusada em ${api} (${r.status}); tentando a próxima.`);
+    }
+    chaveAtual[api] = chaves.length;
+    throw new Error('todas as chaves do Google esgotaram a cota de hoje ou foram recusadas');
+  }
 
   // Localiza a rodoviária do município pelo Google Places (Text Search) e guarda no navegador.
   // Sem rodoviária perto da sede, guarda { nenhuma: true } e a rota usa a sede do município.
   const buscandoRodoviaria = new Map();
-  function localizarRodoviaria(mun, chave) {
+  function localizarRodoviaria(mun) {
     const n = nomeMunicipio(mun);
     if (!n || RODOVIARIAS[n] || (state.rodoviarias && state.rodoviarias[n])) return Promise.resolve();
     if (!buscandoRodoviaria.has(n)) {
-      buscandoRodoviaria.set(n, buscarRodoviaria(n, chave).finally(() => buscandoRodoviaria.delete(n)));
+      buscandoRodoviaria.set(n, buscarRodoviaria(n).finally(() => buscandoRodoviaria.delete(n)));
     }
     return buscandoRodoviaria.get(n);
   }
-  async function buscarRodoviaria(n, chave) {
+  async function buscarRodoviaria(n) {
     const centro = MUN[n];
     const consulta = n === 'Brasília/DF' ? 'Rodoviária Interestadual de Brasília, DF' : `rodoviária de ${cidade(n)}, Bahia`;
-    const r = await fetch('https://places.googleapis.com/v1/places:searchText', {
-      method: 'POST',
-      headers: GOOGLE_HEADERS(chave, 'places.id,places.displayName,places.formattedAddress,places.location,places.types'),
-      body: JSON.stringify({ textQuery: consulta, languageCode: 'pt-BR', regionCode: 'BR', pageSize: 8,
-        locationBias: { circle: { center: { latitude: centro[0], longitude: centro[1] }, radius: 25000 } } }),
-    });
-    const j = await r.json();
-    if (!r.ok) throw new Error((j.error && j.error.message) || 'Places indisponível');
+    const j = await googlePost('places', 'https://places.googleapis.com/v1/places:searchText',
+      'places.id,places.displayName,places.formattedAddress,places.location,places.types',
+      { textQuery: consulta, languageCode: 'pt-BR', regionCode: 'BR', pageSize: 8,
+        locationBias: { circle: { center: { latitude: centro[0], longitude: centro[1] }, radius: 25000 } } });
     let melhor = null, notaMelhor = -1;
     for (const p of j.places || []) {
       const c = [p.location.latitude, p.location.longitude];
@@ -166,21 +185,17 @@
   }
 
   // Google Routes API (computeRoutes): de rodoviária a rodoviária (ou sede, quando não há rodoviária localizada)
-  async function distanciaGoogle(origem, comarca, chave) {
+  async function distanciaGoogle(origem, comarca) {
     const ponto = (mun) => {
       const r = rodoviaria(mun);
       if (r && r.p) return { placeId: r.p };
       const c = pontoRota(mun);
       return { location: { latLng: { latitude: c[0], longitude: c[1] } } };
     };
-    const r = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
-      method: 'POST',
-      headers: GOOGLE_HEADERS(chave, 'routes.distanceMeters,routes.duration'),
-      body: JSON.stringify({ origin: ponto(origem), destination: ponto(comarca), travelMode: 'DRIVE', languageCode: 'pt-BR', regionCode: 'BR' }),
-    });
-    const j = await r.json();
+    const j = await googlePost('routes', 'https://routes.googleapis.com/directions/v2:computeRoutes', 'routes.distanceMeters,routes.duration',
+      { origin: ponto(origem), destination: ponto(comarca), travelMode: 'DRIVE', languageCode: 'pt-BR', regionCode: 'BR' });
     const rt = j.routes && j.routes[0];
-    if (!r.ok || !rt) throw new Error((j.error && j.error.message) || 'sem rota');
+    if (!rt) throw new Error('sem rota');
     return { km: rt.distanceMeters / 1000, min: Math.round(parseInt(rt.duration, 10) / 60) };
   }
 
@@ -199,13 +214,16 @@
   async function calcularDistancia(origem, comarca) {
     if (nomeMunicipio(origem) && nomeMunicipio(origem) === nomeMunicipio(comarca)) return { km: 0, min: 0, fonte: 'mesma cidade' };
     if (!coords(origem) || !coords(comarca)) return null;
-    const chave = state.config.googleKey;
-    if (chave) {
+    if (chavesGoogle().length) {
+      let rodoviariasOk = true;
       for (const mun of [origem, comarca]) {
-        try { await localizarRodoviaria(mun, chave); } catch (e) { console.warn('Places falhou:', e); }
+        try { await localizarRodoviaria(mun); } catch (e) { rodoviariasOk = false; console.warn('Places falhou:', e); }
       }
-      try { return { ...(await distanciaGoogle(origem, comarca, chave)), fonte: 'Google Maps' }; }
-      catch (e) { console.warn('Google Maps falhou:', e); }
+      // a rota tem que ir de rodoviária a rodoviária: sem localizar as duas, fica a estimativa e tenta de novo depois
+      if (rodoviariasOk) {
+        try { return { ...(await distanciaGoogle(origem, comarca)), fonte: 'Google Maps' }; }
+        catch (e) { console.warn('Google Maps falhou:', e); }
+      }
     }
     const a = pontoRota(origem), b = pontoRota(comarca);
     try { return { ...(await distanciaOSRM(a, b)), fonte: 'rota OpenStreetMap' }; }
@@ -241,7 +259,7 @@
     if (distanciaTabela(origem, comarca) || (nomeMunicipio(origem) && nomeMunicipio(origem) === nomeMunicipio(comarca))) return;
     const salvo = state.distancias[k];
     // com chave do Google, refaz o que antes foi só estimado ou calculado pelo OpenStreetMap
-    const refazer = forcar || !salvo || (state.config.googleKey && salvo.fonte !== 'Google Maps');
+    const refazer = forcar || !salvo || (chavesGoogle().length && salvo.fonte !== 'Google Maps' && salvo.fonte !== 'mesma cidade');
     if (!refazer || emCalculo.has(k)) return;
     emCalculo.add(k);
     render();
@@ -292,28 +310,21 @@
 
   // ------------------------------------------------------------------ dados compartilhados
   // Três modos:
-  //  - "claude": página aberta pelo link do Claude; os dados ficam no banco do próprio artefato
-  //    (capacidade db), compartilhado com quem foi convidado como Editor.
-  //  - "firebase": site no GitHub Pages com js/firebase-config.js preenchido (login com Google).
+  //  - "supabase": site publicado (Netlify) com js/supabase-config.js preenchido. Login e senha da equipe;
+  //    os dados ficam na tabela docs da Supabase e são os mesmos para todos.
+  //  - "claude": página aberta pelo link do Claude; banco do próprio artefato (capacidade db).
   //  - local: sem nenhum dos dois, os dados ficam só neste navegador.
 
-  const FB = window.FIREBASE_CONFIG && window.FIREBASE_CONFIG.apiKey ? window.FIREBASE_CONFIG : null;
+  const SB = window.SUPABASE_CONFIG && window.SUPABASE_CONFIG.url ? window.SUPABASE_CONFIG : null;
   const NO_CLAUDE = !!(window.claude && typeof window.claude.use === 'function');
   const nuvem = {
-    tipo: NO_CLAUDE ? 'claude' : FB ? 'firebase' : null,
-    ativo: NO_CLAUDE || !!FB, estado: NO_CLAUDE || FB ? 'carregando' : 'local',
+    tipo: NO_CLAUDE ? 'claude' : SB ? 'supabase' : null,
+    ativo: NO_CLAUDE || !!SB, estado: NO_CLAUDE || SB ? 'carregando' : 'local',
     usuario: null, erro: '', db: null, sinc: {}, pronto: {}, escutas: [], somenteLeitura: false,
   };
   const COLECOES = ['defensores', 'juris', 'distancias', 'rodoviarias'];
-  const SDK = 'https://www.gstatic.com/firebasejs/10.12.2/';
+  const SESSAO_KEY = 'dpejurix:sessao';
 
-  function carregarScript(src) {
-    return new Promise((ok, falha) => {
-      const el = document.createElement('script');
-      el.src = src; el.onload = ok; el.onerror = () => falha(new Error('não foi possível carregar ' + src));
-      document.head.appendChild(el);
-    });
-  }
   // coleção do estado como { chave: objeto }
   function itensDe(coll) {
     const v = state[coll];
@@ -325,6 +336,130 @@
   function idSeguro(k) {
     if (/^[A-Za-z0-9_~:@+-][A-Za-z0-9_.~:@+-]{0,120}$/.test(k)) return k;
     return 'k' + btoa(unescape(encodeURIComponent(k))).replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  // ---- Supabase (API REST)
+  const sessao = {
+    ler() { try { return JSON.parse(localStorage.getItem(SESSAO_KEY)) || null; } catch (e) { return null; } },
+    gravar(v) { try { v ? localStorage.setItem(SESSAO_KEY, JSON.stringify(v)) : localStorage.removeItem(SESSAO_KEY); } catch (e) { /* sem armazenamento */ } },
+  };
+  async function sbFetch(caminho, opcoes = {}) {
+    const s = nuvem.usuario;
+    const headers = { apikey: SB.key, 'Content-Type': 'application/json', ...(s ? { 'x-sessao': s.token } : {}), ...(opcoes.headers || {}) };
+    const r = await fetch(SB.url + '/rest/v1/' + caminho, { ...opcoes, headers });
+    const texto = await r.text();
+    const corpo = texto ? JSON.parse(texto) : null;
+    if (!r.ok) throw new Error((corpo && (corpo.message || corpo.hint)) || 'erro ' + r.status);
+    return corpo;
+  }
+  const sbRpc = (nome, args = {}) => sbFetch('rpc/' + nome, { method: 'POST', body: JSON.stringify(args) });
+  const pgLista = (vals) => '(' + vals.map((v) => '"' + String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"').join(',') + ')';
+
+  async function sbCarregarTudo() {
+    const linhas = [];
+    for (let de = 0; ; de += 1000) {
+      const parte = await sbFetch('docs?select=colecao,chave,dados&order=colecao,chave', { headers: { Range: `${de}-${de + 999}` } });
+      linhas.push(...parte);
+      if (parte.length < 1000) break;
+    }
+    const porColecao = Object.fromEntries(COLECOES.map((c) => [c, {}]));
+    let cfg = {};
+    for (const l of linhas) {
+      if (l.colecao === 'config') { if (l.chave === 'geral') cfg = l.dados || {}; continue; }
+      if (porColecao[l.colecao]) porColecao[l.colecao][l.chave] = l.dados;
+    }
+    COLECOES.forEach((c) => aplicarColecao(c, porColecao[c]));
+    aplicarConfig(cfg);
+  }
+
+  let versaoVista = null, sondando = false;
+  async function sbSondar() {
+    if (sondando || nuvem.estado !== 'pronto' || document.hidden || filaSb.length || enviandoSb) return;
+    sondando = true;
+    try {
+      const v = await sbRpc('versao_docs');
+      if (v === null) { encerrarSessao('Sua sessão expirou. Entre de novo.'); return; }
+      if (v !== versaoVista) { versaoVista = v; await sbCarregarTudo(); }
+    } catch (e) { console.warn('Sincronização:', e); }
+    finally { sondando = false; }
+  }
+
+  // gravações em ordem: cada lote vira um upsert e/ou deletes
+  const filaSb = []; let enviandoSb = false;
+  async function sbEsvaziarFila() {
+    if (enviandoSb) return;
+    enviandoSb = true;
+    try {
+      while (filaSb.length) {
+        const ops = filaSb.shift();
+        const agora = new Date().toISOString();
+        const sets = ops.filter((o) => !o.del).map((o) => ({ colecao: o.coll, chave: o.k, dados: o.data, atualizado_em: agora }));
+        for (let i = 0; i < sets.length; i += 500) {
+          await sbFetch('docs?on_conflict=colecao,chave', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify(sets.slice(i, i + 500)) });
+        }
+        const dels = {};
+        ops.filter((o) => o.del).forEach((o) => { (dels[o.coll] = dels[o.coll] || []).push(o.k); });
+        for (const [coll, ks] of Object.entries(dels)) {
+          for (let i = 0; i < ks.length; i += 100) {
+            await sbFetch(`docs?colecao=eq.${encodeURIComponent(coll)}&chave=in.${encodeURIComponent(pgLista(ks.slice(i, i + 100)))}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } });
+          }
+        }
+      }
+      versaoVista = await sbRpc('versao_docs');
+    } catch (e) {
+      console.warn(e);
+      toast('Não foi possível salvar no banco: ' + e.message + '. Recarregue a página.');
+    } finally { enviandoSb = false; }
+  }
+
+  async function entrarSupabase(login, senha) {
+    const token = await sbRpc('entrar', { p_login: login, p_senha: senha });
+    if (!token) return false;
+    nuvem.usuario = { login: login.trim().toLowerCase(), token };
+    sessao.gravar(nuvem.usuario);
+    return true;
+  }
+
+  function encerrarSessao(msg) {
+    nuvem.usuario = null; sessao.gravar(null);
+    pararEscuta();
+    nuvem.estado = 'login'; nuvem.erro = msg || '';
+    render();
+  }
+
+  async function sairSupabase() {
+    try { await sbRpc('sair'); } catch (e) { /* sessão já inválida */ }
+    encerrarSessao();
+  }
+
+  async function iniciarSupabase() {
+    const s = sessao.ler();
+    if (s && s.token) {
+      nuvem.usuario = s;
+      try {
+        const login = await sbRpc('sessao_login');
+        if (!login) return encerrarSessao();
+      } catch (e) {
+        nuvem.estado = 'erro'; nuvem.erro = 'Não foi possível falar com o banco de dados: ' + e.message; render(); return;
+      }
+      return conectarSupabase();
+    }
+    nuvem.estado = 'login'; render();
+  }
+
+  async function conectarSupabase() {
+    nuvem.estado = 'conectando'; render();
+    try {
+      versaoVista = await sbRpc('versao_docs');
+      await sbCarregarTudo();
+    } catch (e) {
+      nuvem.estado = 'erro'; nuvem.erro = e.message; render(); return;
+    }
+    const t = setInterval(sbSondar, 10000);
+    const foco = () => sbSondar();
+    window.addEventListener('focus', foco);
+    document.addEventListener('visibilitychange', foco);
+    nuvem.escutas.push(() => { clearInterval(t); window.removeEventListener('focus', foco); document.removeEventListener('visibilitychange', foco); });
   }
 
   // ---- operações por tipo de banco
@@ -345,30 +480,12 @@
           op.del ? { del: true } : { data: op.coll === 'config' ? op.data : { ...op.data, _k: op.k } }));
       },
     },
-    firebase: {
-      ref: (coll, k) => (coll === 'config' ? nuvem.db.collection('config').doc('geral') : nuvem.db.collection(coll).doc(encodeURIComponent(k))),
-      escutar(coll, cb) {
-        return nuvem.db.collection(coll).onSnapshot((snap) => {
-          const itens = {};
-          snap.forEach((d) => { itens[decodeURIComponent(d.id)] = d.data(); });
-          cb(itens);
-        }, falhaEscuta);
-      },
-      escutarConfig(cb) {
-        return this.ref('config').onSnapshot((d) => cb(d.exists ? d.data() : {}), falhaEscuta);
-      },
-      enviar(ops) {
-        for (let i = 0; i < ops.length; i += 400) {
-          const lote = nuvem.db.batch();
-          ops.slice(i, i + 400).forEach((op) => (op.del ? lote.delete(this.ref(op.coll, op.k)) : lote.set(this.ref(op.coll, op.k), op.data)));
-          lote.commit().catch((e) => { console.warn(e); toast('Não foi possível salvar no banco compartilhado: ' + e.message); });
-        }
-      },
+    supabase: {
+      enviar(ops) { filaSb.push(ops); sbEsvaziarFila(); },
     },
   };
 
-  // fila de gravação do banco do Claude: uma gravação por documento por vez, no máximo 4 simultâneas;
-  // alterações seguidas no mesmo documento viram uma só
+  // fila de gravação do banco do Claude: uma gravação por documento por vez, no máximo 4 simultâneas
   const filaPendentes = new Map(), filaEmVoo = new Set();
   function enfileirar(path, op) { filaPendentes.set(path, op); bombear(); }
   function bombear() {
@@ -389,32 +506,18 @@
   }
 
   async function iniciarNuvem() {
-    if (nuvem.tipo === 'claude') {
-      const db = await window.claude.use('db');
-      if (!db) return modoLocal('O banco compartilhado não está disponível nesta visualização.');
-      nuvem.db = db;
-      const user = await window.claude.use('user');
-      const pode = user ? await user.can('data.write') : null;
-      nuvem.somenteLeitura = pode === false;
-      nuvem.estado = 'conectando';
-      render();
-      escutar();
-      return;
-    }
-    try {
-      for (const f of ['firebase-app-compat.js', 'firebase-auth-compat.js', 'firebase-firestore-compat.js']) await carregarScript(SDK + f);
-      firebase.initializeApp(FB);
-      nuvem.db = firebase.firestore();
-      firebase.auth().onAuthStateChanged((u) => {
-        nuvem.usuario = u;
-        pararEscuta();
-        nuvem.estado = u ? 'conectando' : 'login';
-        if (u) escutar();
-        render();
-      });
-    } catch (e) {
-      modoLocal(e.message);
-    }
+    if (nuvem.tipo === 'supabase') return iniciarSupabase();
+    const db = await window.claude.use('db');
+    if (!db) return modoLocal('O banco compartilhado não está disponível nesta visualização.');
+    nuvem.db = db;
+    const user = await window.claude.use('user');
+    const pode = user ? await user.can('data.write') : null;
+    nuvem.somenteLeitura = pode === false;
+    nuvem.estado = 'conectando';
+    render();
+    const b = backend.claude;
+    COLECOES.forEach((coll) => nuvem.escutas.push(b.escutar(coll, (itens) => aplicarColecao(coll, itens))));
+    nuvem.escutas.push(b.escutarConfig(aplicarConfig));
   }
 
   function modoLocal(motivo) {
@@ -428,40 +531,27 @@
 
   function falhaEscuta(e) {
     console.warn('Banco compartilhado:', e);
-    nuvem.estado = e && e.code === 'permission-denied' ? 'negado' : 'erro';
+    nuvem.estado = 'erro';
     nuvem.erro = (e && e.message) || String(e); render();
   }
 
-  function escutar() {
-    const b = backend[nuvem.tipo];
-    for (const coll of COLECOES) {
-      nuvem.escutas.push(b.escutar(coll, (itens) => {
-        nuvem.sinc[coll] = Object.fromEntries(Object.entries(itens).map(([k, v]) => [k, JSON.stringify(v)]));
-        state[coll] = Array.isArray(state[coll]) ? Object.values(itens) : itens;
-        nuvem.pronto[coll] = true;
-        aoReceber();
-      }));
-    }
-    nuvem.escutas.push(b.escutarConfig((cfg) => {
-      state.config = { googleKey: '', ...cfg };
-      nuvem.sinc.config = JSON.stringify(state.config);
-      nuvem.pronto.config = true;
-      aoReceber();
-    }));
+  function aplicarColecao(coll, itens) {
+    nuvem.sinc[coll] = Object.fromEntries(Object.entries(itens).map(([k, v]) => [k, JSON.stringify(v)]));
+    state[coll] = Array.isArray(state[coll]) ? Object.values(itens) : itens;
+    nuvem.pronto[coll] = true;
+    aoReceber();
+  }
+  function aplicarConfig(cfg) {
+    state.config = { googleKey: '', ...cfg };
+    nuvem.sinc.config = JSON.stringify(state.config);
+    nuvem.pronto.config = true;
+    aoReceber();
   }
 
   function aoReceber() {
     if (nuvem.estado !== 'pronto') {
       if (!COLECOES.every((c) => nuvem.pronto[c]) || !nuvem.pronto.config) return;
       nuvem.estado = 'pronto';
-      // Firebase: banco vazio recebe a lista inicial de defensores e o que já estava neste navegador
-      if (nuvem.tipo === 'firebase' && !state.defensores.length) {
-        const local = carregar();
-        COLECOES.forEach((c) => { state[c] = local[c]; });
-        if (!state.config.googleKey && local.config.googleKey) state.config.googleKey = local.config.googleKey;
-        enviarMudancas();
-        toast('Banco compartilhado iniciado com a lista de defensores.');
-      }
     }
     render();
   }
@@ -486,14 +576,22 @@
   }
 
   function telaNuvem() {
-    const u = nuvem.usuario;
+    if (nuvem.estado === 'login') {
+      return `<section class="login-box panel">
+        <img class="login-logo" src="img/logo-dpe-ba.png" alt="Defensoria Pública do Estado da Bahia">
+        <h1>Designações do Júri</h1>
+        <form id="form-login" class="login-form" autocomplete="on">
+          <div class="field"><label for="lg-login">Login</label><input id="lg-login" name="username" autocomplete="username" required></div>
+          <div class="field"><label for="lg-senha">Senha</label><input id="lg-senha" name="password" type="password" autocomplete="current-password" required></div>
+          ${nuvem.erro ? `<p class="login-erro" role="alert">${esc(nuvem.erro)}</p>` : ''}
+          <button class="btn primary" type="submit" id="lg-entrar">Entrar</button>
+        </form>
+        <p class="small muted">Acesso restrito à equipe.</p>
+      </section>`;
+    }
     const corpo = {
       carregando: '<strong>Carregando…</strong>',
-      conectando: '<strong>Carregando os dados compartilhados…</strong>',
-      login: `<strong>Entre para acessar as designações</strong><span>O acesso é restrito às pessoas autorizadas.</span>
-        <button class="btn primary" data-action="login">Entrar com Google</button>`,
-      negado: `<strong>Este e-mail não tem acesso</strong><span>${esc(u && u.email)} não está na lista de pessoas autorizadas. Peça ao responsável para incluí-lo.</span>
-        <button class="btn" data-action="sair">Entrar com outra conta</button>`,
+      conectando: '<strong>Carregando os dados…</strong>',
       erro: `<strong>Não foi possível carregar os dados</strong><span class="small">${esc(nuvem.erro)}</span>
         <button class="btn" data-action="recarregar">Tentar de novo</button>`,
     }[nuvem.estado] || '';
@@ -503,13 +601,14 @@
   function renderConta() {
     const el = $('#conta');
     if (!el) return;
+    document.body.classList.toggle('sem-sessao', nuvem.tipo === 'supabase' && nuvem.estado === 'login');
     if (!nuvem.ativo) { el.innerHTML = '<span class="conta-modo" title="Os dados ficam só neste navegador">Modo local</span>'; return; }
     if (nuvem.tipo === 'claude') {
       el.innerHTML = `<span class="conta-modo" title="Todos os convidados veem os mesmos dados">${nuvem.somenteLeitura ? 'Somente leitura' : 'Dados compartilhados'}</span>`;
       return;
     }
     const u = nuvem.usuario;
-    el.innerHTML = u ? `<span class="conta-email" title="Dados compartilhados">${esc(u.email)}</span><button class="conta-sair" data-action="sair">Sair</button>` : '';
+    el.innerHTML = u && nuvem.estado !== 'login' ? `<span class="conta-email">${esc(u.login)}</span><button class="conta-sair" data-action="sair">Sair</button>` : '';
   }
 
   const defById = (id) => state.defensores.find((d) => d.id === id);
@@ -1014,7 +1113,7 @@
     const confirmarReset = ui.confirmar && ui.confirmar.tipo === 'reset';
     return `
     <div class="page-head"><div><h1>Configurações</h1></div></div>
-    ${nuvem.ativo ? `<div class="notice">Dados compartilhados: você está conectado como <b>${esc(nuvem.usuario && nuvem.usuario.email)}</b>. Tudo o que for registrado aqui, inclusive a chave do Google, vale para todas as pessoas autorizadas.</div>`
+    ${nuvem.ativo ? `<div class="notice">Dados compartilhados${nuvem.usuario ? `: você entrou como <b>${esc(nuvem.usuario.login)}</b>` : ''}. Tudo o que for registrado aqui, inclusive as chaves do Google, vale para toda a equipe.</div>`
       : `<div class="notice warn">Modo local: os dados ficam só neste navegador.${nuvem.erro ? ' O banco compartilhado não pôde ser carregado nesta página.' : ''}</div>`}
     ${persistente ? '' : '<div class="notice warn">Este navegador não está permitindo salvar dados. Use o backup abaixo para não perder o que foi registrado.</div>'}
 
@@ -1022,12 +1121,12 @@
       <div class="panel-head"><h2>Cálculo de distância</h2></div>
       <div class="panel-body">
         <p>Cada rota sai da rodoviária da cidade de origem do defensor e chega à rodoviária do município do júri. Sem chave do Google, o site calcula a rota de carro pelo OpenStreetMap; se ele não responder, usa uma estimativa (linha reta × 1,3). Cada linha tem o link “Abrir rota” no Google Maps, e o campo “km” de cada defensor substitui qualquer cálculo.</p>
-        <form id="form-google" class="inline-form" autocomplete="off">
-          <div class="field grow"><label for="cfg-google">Chave da API do Google Maps (opcional)</label>
-            <input id="cfg-google" class="mono" placeholder="AIza…" value="${esc(state.config.googleKey)}"></div>
-          <button class="btn primary" type="submit">Salvar chave</button>
+        <form id="form-google" class="hab-form" autocomplete="off">
+          <div class="field"><label for="cfg-google">Chaves da API do Google Maps (uma por linha, usadas em rodízio)</label>
+            <textarea id="cfg-google" class="mono" rows="3" placeholder="AIza…">${esc(chavesGoogle().join('\n'))}</textarea></div>
+          <div><button class="btn primary" type="submit">Salvar chaves</button></div>
         </form>
-        <p class="small muted">Com a chave, o site localiza a rodoviária de cada cidade (Google Places) e calcula a rota de carro de rodoviária a rodoviária (Google Routes). Cada rota é calculada uma vez e fica guardada; rodoviárias e trajetos já conhecidos não gastam consultas. A chave de demonstração do Google funciona, com limite diário de consultas.</p>
+        <p class="small muted">O site usa a primeira chave; quando ela esgota a cota do dia ou é recusada, passa para a próxima. Com as chaves, ele localiza a rodoviária de cada cidade (Google Places) e calcula a rota de carro de rodoviária a rodoviária (Google Routes). Cada rota é calculada uma vez e fica guardada para todos; rodoviárias e trajetos já conhecidos não gastam consultas.</p>
         <div class="inline-form"><span class="small muted">${nDist} trajeto(s) já calculado(s) e guardado(s).</span>
           <button class="btn sm" data-action="limpar-distancias"${nDist ? '' : ' disabled'}>Apagar distâncias calculadas</button></div>
       </div>
@@ -1153,16 +1252,8 @@
     render();
   });
 
-  function entrar() {
-    const prov = new firebase.auth.GoogleAuthProvider();
-    prov.setCustomParameters({ prompt: 'select_account' });
-    firebase.auth().signInWithPopup(prov).catch((e) => {
-      if (e.code === 'auth/popup-blocked' || e.code === 'auth/operation-not-supported-in-this-environment') firebase.auth().signInWithRedirect(prov);
-      else if (e.code !== 'auth/popup-closed-by-user' && e.code !== 'auth/cancelled-popup-request') toast('Não foi possível entrar: ' + e.message);
-    });
-  }
   document.getElementById('conta').addEventListener('click', (ev) => {
-    if (ev.target.closest('[data-action="sair"]')) firebase.auth().signOut();
+    if (ev.target.closest('[data-action="sair"]')) sairSupabase();
   });
 
   app.addEventListener('click', (ev) => {
@@ -1217,8 +1308,7 @@
       case 'exportar-csv': baixar(`juris-${isoHoje()}.csv`, csvJuris(), 'text/csv;charset=utf-8'); break;
       case 'pedir-reset': ui.confirmar = { tipo: 'reset' }; render(); break;
       case 'reset': state = estadoInicial(); ui.confirmar = null; salvar(); render(); toast('Dados apagados.'); break;
-      case 'login': entrar(); break;
-      case 'sair': firebase.auth().signOut(); break;
+      case 'sair': sairSupabase(); break;
       case 'recarregar': location.reload(); break;
     }
   });
@@ -1307,6 +1397,16 @@
     ev.preventDefault();
     const f = ev.target;
 
+    if (f.id === 'form-login') {
+      const login = $('#lg-login').value, senha = $('#lg-senha').value, botao = $('#lg-entrar');
+      botao.disabled = true; botao.textContent = 'Entrando…';
+      entrarSupabase(login, senha).then((ok) => {
+        if (ok) { nuvem.erro = ''; conectarSupabase(); }
+        else { nuvem.erro = 'Login ou senha incorretos.'; render(); const c = $('#lg-senha'); if (c) c.focus(); }
+      }).catch((e) => { nuvem.erro = 'Não foi possível entrar: ' + e.message; render(); });
+      return;
+    }
+
     if (f.id === 'form-juri' && f.dataset.novo === '1') {
       const fd = new FormData(f);
       const processo = String(fd.get('processo') || '').trim();
@@ -1355,9 +1455,11 @@
     }
 
     if (f.id === 'form-google') {
-      state.config.googleKey = $('#cfg-google').value.trim();
+      state.config.googleKeys = [...new Set($('#cfg-google').value.split(/[\s,;]+/).map((c) => c.trim()).filter(Boolean))];
+      state.config.googleKey = '';
+      Object.keys(chaveAtual).forEach((k) => delete chaveAtual[k]);
       salvar(); render();
-      toast(state.config.googleKey ? 'Chave salva. Use “Recalcular distâncias” nos júris já registrados.' : 'Chave removida.');
+      toast(state.config.googleKeys.length ? `${state.config.googleKeys.length} chave(s) salva(s).` : 'Chaves removidas.');
     }
   });
 
