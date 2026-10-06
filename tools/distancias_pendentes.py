@@ -8,7 +8,9 @@ defensores/, juris/, distancias/ e rodoviarias/ (as que existirem).
 Saída: pasta com um JSON por documento a gravar e lote-1.json, lote-2.json... (até 50 gravações
 cada), prontos para o ArtifactData "batch". Nada é gravado no banco por este script.
 
-Uso: GOOGLE_MAPS_KEY=AIza... python3 tools/distancias_pendentes.py <pasta-exportada> <pasta-saida> [limite]
+Uso: GOOGLE_MAPS_KEYS=chave1,chave2,... python3 tools/distancias_pendentes.py <pasta-exportada> <pasta-saida> [limite]
+As chaves são usadas em ordem: quando uma esgota a cota ou é recusada, passa para a próxima
+(separadamente para a busca de rodoviárias e para as rotas).
 """
 import base64, datetime, json, math, os, re, sys, unicodedata, urllib.error, urllib.request
 from pathlib import Path
@@ -50,21 +52,32 @@ class Cota(Exception):
     pass
 
 
-def post(url, chave, campos, corpo):
-    req = urllib.request.Request(url, data=json.dumps(corpo).encode(), method="POST", headers={
-        "Content-Type": "application/json", "X-Goog-Api-Key": chave, "X-Goog-FieldMask": campos})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        if e.code in (403, 429):
-            raise Cota(e.read()[:200].decode("utf-8", "ignore"))
-        return {}
+class Chaves:
+    """Rodízio de chaves: cada API (places, routes) avança para a próxima chave quando a atual é recusada."""
+
+    def __init__(self, chaves):
+        self.chaves, self.atual = chaves, {}
+
+    def post(self, api, url, campos, corpo):
+        while self.atual.get(api, 0) < len(self.chaves):
+            chave = self.chaves[self.atual.get(api, 0)]
+            req = urllib.request.Request(url, data=json.dumps(corpo).encode(), method="POST", headers={
+                "Content-Type": "application/json", "X-Goog-Api-Key": chave, "X-Goog-FieldMask": campos})
+            try:
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    return json.load(r)
+            except urllib.error.HTTPError as e:
+                if e.code not in (403, 429):
+                    return {}
+                msg = e.read()[:120].decode("utf-8", "ignore").replace("\n", " ")
+                print(f"  chave {chave[:10]}… recusada em {api} (HTTP {e.code}); tentando a próxima. {msg}")
+                self.atual[api] = self.atual.get(api, 0) + 1
+        raise Cota(f"todas as chaves esgotadas ou recusadas em {api}")
 
 
-def buscar_rodoviaria(chave, mun, centro):
+def buscar_rodoviaria(chaves, mun, centro):
     consulta = "Rodoviária Interestadual de Brasília, DF" if mun == "Brasília/DF" else f"rodoviária de {mun}, Bahia"
-    j = post("https://places.googleapis.com/v1/places:searchText", chave,
+    j = chaves.post("places", "https://places.googleapis.com/v1/places:searchText",
              "places.id,places.displayName,places.formattedAddress,places.location,places.types",
              {"textQuery": consulta, "languageCode": "pt-BR", "regionCode": "BR", "pageSize": 8,
               "locationBias": {"circle": {"center": {"latitude": centro[0], "longitude": centro[1]}, "radius": 25000.0}}})
@@ -88,7 +101,10 @@ def buscar_rodoviaria(chave, mun, centro):
 def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
-    chave = os.environ.get("GOOGLE_MAPS_KEY") or sys.exit("Defina GOOGLE_MAPS_KEY.")
+    lista = [c.strip() for c in (os.environ.get("GOOGLE_MAPS_KEYS") or os.environ.get("GOOGLE_MAPS_KEY") or "").split(",") if c.strip()]
+    if not lista:
+        sys.exit("Defina GOOGLE_MAPS_KEYS (chaves separadas por vírgula).")
+    chave = Chaves(lista)
     entrada, saida = sys.argv[1], Path(sys.argv[2])
     limite = int(sys.argv[3]) if len(sys.argv) > 3 else 95
     saida.mkdir(parents=True, exist_ok=True)
@@ -147,7 +163,7 @@ def main():
                 continue  # a rota tem que sair e chegar na rodoviária: espera localizar
             ponto = lambda m: ({"placeId": rods[m]["p"]} if rods.get(m, {}).get("p")
                                else {"location": {"latLng": {"latitude": mun[m][0], "longitude": mun[m][1]}}})
-            j = post("https://routes.googleapis.com/directions/v2:computeRoutes", chave, "routes.distanceMeters,routes.duration",
+            j = chave.post("routes", "https://routes.googleapis.com/directions/v2:computeRoutes", "routes.distanceMeters,routes.duration",
                      {"origin": ponto(o), "destination": ponto(c), "travelMode": "DRIVE", "languageCode": "pt-BR", "regionCode": "BR"})
             rt = (j.get("routes") or [None])[0]
             feitas += 1
