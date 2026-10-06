@@ -8,3 +8,5 @@
   [headers.values]
     X-Frame-Options = "DENY"
     Referrer-Policy = "strict-origin-when-cross-origin"
+    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://ucygnruyyqqkijghpncr.supabase.co https://routes.googleapis.com https://places.googleapis.com https://router.project-osrm.org; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    X-Content-Type-Options = "nosniff"

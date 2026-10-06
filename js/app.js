@@ -40,8 +40,8 @@
   }
   function fmtData(iso) {
     if (!iso) return '—';
-    const [y, m, d] = iso.split('-');
-    return `${d}/${m}/${y}`;
+    const [y, m, d] = String(iso).split('-');
+    return esc(`${d}/${m}/${y}`);
   }
   function fmtKm(km) {
     if (km == null || isNaN(km)) return '—';
@@ -535,7 +535,19 @@
     nuvem.erro = (e && e.message) || String(e); render();
   }
 
+  const ID_OK = /^[A-Za-z0-9_-]{1,64}$/;
+  function sanear(coll, itens) {
+    if (coll !== 'defensores' && coll !== 'juris') return itens;
+    const ok = {};
+    for (const [k, v] of Object.entries(itens)) {
+      if (!v || !ID_OK.test(String(v.id))) continue;
+      if (coll === 'juris') v.habilitacoes = (v.habilitacoes || []).filter((h) => h && ID_OK.test(String(h.defensorId)));
+      ok[k] = v;
+    }
+    return ok;
+  }
   function aplicarColecao(coll, itens) {
+    itens = sanear(coll, itens);
     nuvem.sinc[coll] = Object.fromEntries(Object.entries(itens).map(([k, v]) => [k, JSON.stringify(v)]));
     state[coll] = Array.isArray(state[coll]) ? Object.values(itens) : itens;
     nuvem.pronto[coll] = true;
@@ -1385,6 +1397,7 @@
           const s = JSON.parse(fr.result);
           if (!s || !Array.isArray(s.defensores) || !Array.isArray(s.juris)) throw new Error('formato');
           s.distancias = s.distancias || {}; s.rodoviarias = s.rodoviarias || {}; s.config = s.config || { googleKey: '' };
+          ['defensores', 'juris'].forEach((c) => { s[c] = Object.values(sanear(c, Object.fromEntries((s[c] || []).map((x) => [x && x.id, x])))); });
           state = s; salvar(); render();
           toast(`Backup restaurado: ${s.defensores.length} defensores e ${s.juris.length} júris.`);
         } catch (e) { toast('Arquivo inválido. Escolha um backup .json gerado por este site.'); }
