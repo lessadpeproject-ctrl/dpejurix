@@ -299,7 +299,10 @@
     } catch (e) { console.warn(e); }
     return estadoInicial();
   }
+  const ID_OK = /^[A-Za-z0-9_-]{1,64}$/;
+  const DATA_OK = /^\d{4}-\d{2}-\d{2}$/;
   let state = carregar();
+  ['defensores', 'juris'].forEach((c) => { state[c] = Object.values(sanear(c, Object.fromEntries((state[c] || []).map((x) => [x && x.id, x])))); });
   let persistente = true;
   function salvar() {
     if (nuvem.estado === 'pronto') { enviarMudancas(); return; }
@@ -535,13 +538,18 @@
     nuvem.erro = (e && e.message) || String(e); render();
   }
 
-  const ID_OK = /^[A-Za-z0-9_-]{1,64}$/;
   function sanear(coll, itens) {
     if (coll !== 'defensores' && coll !== 'juris') return itens;
     const ok = {};
     for (const [k, v] of Object.entries(itens)) {
       if (!v || !ID_OK.test(String(v.id))) continue;
-      if (coll === 'juris') v.habilitacoes = (v.habilitacoes || []).filter((h) => h && ID_OK.test(String(h.defensorId)));
+      if (coll === 'juris') {
+        v.habilitacoes = (v.habilitacoes || []).filter((h) => h && ID_OK.test(String(h.defensorId)));
+        v.habilitacoes.forEach((h) => { if (!DATA_OK.test(String(h.habilitadoEm || ''))) h.habilitadoEm = ''; });
+        if (v.data && !DATA_OK.test(String(v.data))) v.data = '';
+        if (!STATUS_BY[v.status]) v.status = 'agendado';
+      }
+      if (coll === 'defensores' && v.ingresso && !DATA_OK.test(String(v.ingresso))) v.ingresso = '';
       ok[k] = v;
     }
     return ok;
@@ -1009,10 +1017,10 @@
       <section class="panel">
         <div class="panel-head"><h2>Próximas sessões</h2><a class="btn sm" href="#juris">Ver todos</a></div>
         ${proximos.length ? `<ul class="next-list">${proximos.map((j) => {
-          const [, m, d] = j.data.split('-');
+          const [, m, d] = String(j.data).split('-').map((x) => esc(x));
           const des = j.habilitacoes.filter((h) => h.designado && !h.desistiu).map((h) => defById(h.defensorId)).filter(Boolean);
           return `<li>
-            <div class="date-chip"><span class="d">${d}</span><span class="m">${MESES[Number(m) - 1]}</span></div>
+            <div class="date-chip"><span class="d">${d}</span><span class="m">${MESES[Number(m) - 1] || ''}</span></div>
             <div style="min-width:0"><a href="#juri-${j.id}">${esc(j.comarca)}</a>
               <div class="small muted mono">${esc(j.processo)}</div>
               <div class="small">${des.length ? des.map((x) => esc(primeiroNome(x.nome))).join(', ') : '<span class="muted">sem designação</span>'}</div></div>
