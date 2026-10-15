@@ -877,7 +877,7 @@
           if (res === 'Desistiu') d.cell.styles.textColor = [150, 150, 150];
         },
       });
-      rodape(doc, 'Ordem de classificação: 1) quem fez o art. 422 neste júri; 2) menor distância de rodoviária a rodoviária; 3) menos júris realizados; 4) menos júris futuros designados; 5) maior tempo de DPE.');
+      rodape(doc, 'Designações do Júri — Defensoria Pública do Estado da Bahia.');
       doc.save(`designacao-${nomeArquivo(j.comarca)}-${(j.processo || '').replace(/\D/g, '')}.pdf`);
       toast('PDF gerado.');
     } catch (e) { console.warn(e); toast('Não foi possível gerar o PDF: ' + e.message); }
