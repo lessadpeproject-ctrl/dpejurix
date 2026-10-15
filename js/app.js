@@ -860,8 +860,7 @@
         doc.setFont('helvetica', 'normal'); doc.setTextColor(21, 33, 29); doc.text(String(v), x + doc.getTextWidth(k + ': ') + 1, yy);
       });
       const linha = (l, resultado) => [resultado, l.def.nome, l.def.origem, l.h.art422 ? 'Sim' : '—',
-        l.km == null ? '—' : fmtKm(l.km), String(l.st.realizados), String(l.st.futuros),
-        (tempoDPE(l.def.ingresso) || {}).texto || '—', dataTexto(l.h.habilitadoEm)];
+        l.km == null ? '—' : fmtKm(l.km), String(l.st.realizados), String(l.st.futuros)];
       const corpo = [
         ...designados.map((l) => linha(l, designados.length > 1 ? 'Designado(a)' : 'Designado(a)')),
         ...suplentes.map((l, i) => linha(l, `${i + 1}º suplente`)),
@@ -869,7 +868,7 @@
       ];
       doc.autoTable({
         ...ESTILO_TABELA, startY: y + 16,
-        head: [['Resultado', 'Defensor(a)', 'Origem', 'Art. 422', 'Distância', 'Júris realizados', 'Júris futuros', 'Tempo de DPE', 'Habilitado em']],
+        head: [['Resultado', 'Defensor(a)', 'Origem', 'Art. 422', 'Distância', 'Júris realizados', 'Júris futuros']],
         body: corpo,
         didParseCell: (d) => {
           if (d.section !== 'body') return;
@@ -902,8 +901,8 @@
         .filter((x) => x.st.realizados || x.st.futuros || x.st.habilitacoes).sort((a, b) => a.d.nome.localeCompare(b.d.nome, 'pt-BR'));
       if (defs.length) {
         doc.autoTable({ ...ESTILO_TABELA, startY: doc.lastAutoTable.finalY + 10,
-          head: [['Defensor(a)', 'Origem', 'Júris realizados', 'Júris futuros', 'Habilitações', 'Tempo de DPE']],
-          body: defs.map(({ d, st }) => [d.nome, d.origem, String(st.realizados), String(st.futuros), String(st.habilitacoes), (tempoDPE(d.ingresso) || {}).texto || '—']) });
+          head: [['Defensor(a)', 'Origem', 'Júris realizados', 'Júris futuros', 'Habilitações']],
+          body: defs.map(({ d, st }) => [d.nome, d.origem, String(st.realizados), String(st.futuros), String(st.habilitacoes)]) });
       }
       rodape(doc, 'Designações do Júri — Defensoria Pública do Estado da Bahia.');
       doc.save(`designacoes-juri-${isoHoje()}.pdf`);
