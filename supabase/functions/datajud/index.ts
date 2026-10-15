@@ -58,7 +58,7 @@ Deno.serve(async (req) => {
   const movs = hits.flatMap((h: any) => (h.movimentos || []).map((m: any) => ({
     data: m.dataHora || "",
     nome: m.nome || "",
-    detalhe: (m.complementosTabelados || []).map((c: any) => c.descricao || c.nome || "").filter(Boolean).join("; "),
+    detalhe: (m.complementosTabelados || []).map((c: any) => c.nome || "").filter(Boolean).join("; "),
     grau: h.grau || "",
   })));
   movs.sort((a: any, b: any) => b.data.localeCompare(a.data));
@@ -66,7 +66,7 @@ Deno.serve(async (req) => {
     encontrado: true,
     classe: p.classe?.nome || "",
     orgao: p.orgaoJulgador?.nome || "",
-    ajuizamento: p.dataAjuizamento || "",
+    ajuizamento: String(p.dataAjuizamento || "").replace(/^(\d{4})(\d{2})(\d{2})\d*$/, "$1-$2-$3"),
     ultimaAtualizacao: p.dataHoraUltimaAtualizacao || "",
     graus: [...new Set(hits.map((h: any) => h.grau).filter(Boolean))],
     assuntos: (p.assuntos || []).map((a: any) => a.nome).filter(Boolean).slice(0, 5),

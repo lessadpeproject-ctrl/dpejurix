@@ -776,6 +776,141 @@
 
   // ------------------------------------------------------------------ telas
 
+  // ---- PDF (jsPDF + autotable, carregados só quando necessário)
+  function carregarScript(src) {
+    return new Promise((ok, falha) => {
+      const el = document.createElement('script');
+      el.src = src; el.onload = ok; el.onerror = () => falha(new Error('não foi possível carregar ' + src));
+      document.head.appendChild(el);
+    });
+  }
+  let pdfPronto = null;
+  function prepararPdf() {
+    if (!pdfPronto) {
+      pdfPronto = (async () => {
+        await carregarScript('js/vendor/jspdf.umd.min.js');
+        await carregarScript('js/vendor/jspdf.plugin.autotable.min.js');
+        const img = await new Promise((ok) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => ok(null); i.src = 'img/logo-dpe-ba.png'; });
+        let logo = null;
+        if (img) {
+          try { const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight; c.getContext('2d').drawImage(img, 0, 0); logo = { url: c.toDataURL('image/png'), w: img.naturalWidth, h: img.naturalHeight }; }
+          catch (e) { logo = null; } // sem logo (ex.: página aberta como arquivo local)
+        }
+        return logo;
+      })().catch((e) => { pdfPronto = null; throw e; });
+    }
+    return pdfPronto;
+  }
+  const dataTexto = (iso) => { if (!iso) return '—'; const [y, m, d] = String(iso).slice(0, 10).split('-'); return `${d}/${m}/${y}`; };
+  const agoraTexto = () => new Date().toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
+  const nomeArquivo = (s) => norm(s).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+  function novoDoc(logo, titulo, subtitulo) {
+    const doc = new window.jspdf.jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+    const W = doc.internal.pageSize.getWidth();
+    let y = 12;
+    if (logo) { const h = 18, w = h * logo.w / logo.h; doc.addImage(logo.url, 'PNG', 14, y, w, h); }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(15); doc.setTextColor(28, 90, 73);
+    doc.text(titulo, W - 14, y + 7, { align: 'right' });
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(90, 106, 101);
+    doc.text(subtitulo, W - 14, y + 13, { align: 'right' });
+    doc.setDrawColor(28, 90, 73); doc.setLineWidth(0.6); doc.line(14, y + 22, W - 14, y + 22);
+    return { doc, y: y + 28, W };
+  }
+  function rodape(doc, texto) {
+    const n = doc.getNumberOfPages(), W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight();
+    for (let i = 1; i <= n; i++) {
+      doc.setPage(i); doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(120, 130, 126);
+      doc.text(doc.splitTextToSize(texto, W - 60), 14, H - 10);
+      doc.text(`Página ${i} de ${n}`, W - 14, H - 10, { align: 'right' });
+    }
+  }
+  const ESTILO_TABELA = {
+    styles: { font: 'helvetica', fontSize: 8.5, cellPadding: 2, textColor: [21, 33, 29], lineColor: [214, 223, 219], lineWidth: 0.1 },
+    headStyles: { fillColor: [28, 90, 73], textColor: 255, fontStyle: 'bold' },
+    alternateRowStyles: { fillColor: [246, 248, 247] },
+    margin: { left: 14, right: 14, bottom: 18 },
+  };
+
+  // Resultado de um júri: designados, depois suplentes em ordem, depois desistentes
+  function resultadoJuri(j) {
+    const r = classificar(j);
+    let designados = r.ativos.filter((l) => l.h.designado);
+    if (!designados.length) designados = r.ativos.filter((l) => l.dentro);
+    const ids = new Set(designados.map((l) => l.def.id));
+    const suplentes = r.ativos.filter((l) => !ids.has(l.def.id));
+    return { r, designados, suplentes };
+  }
+
+  async function gerarPdfJuri(j) {
+    if (!j) return;
+    try {
+      const logo = await prepararPdf();
+      const { r, designados, suplentes } = resultadoJuri(j);
+      if (!designados.length && !suplentes.length) { toast('Habilite os defensores antes de gerar o resultado.'); return; }
+      const { doc, y, W } = novoDoc(logo, 'Resultado da designação — Tribunal do Júri', 'Emitido em ' + agoraTexto());
+      const info = [
+        ['Processo', j.processo], ['Comarca', j.comarca], ['Data do júri', dataTexto(j.data)],
+        ['Nº SEI', j.sei || '—'], ['Vagas', String(j.vagas || designados.length || '—')], ['Situação', (STATUS_BY[j.status] || STATUS[0]).label],
+      ];
+      doc.setFontSize(9.5);
+      info.forEach(([k, v], i) => {
+        const x = 14 + (i % 3) * ((W - 28) / 3), yy = y + Math.floor(i / 3) * 6;
+        doc.setFont('helvetica', 'bold'); doc.setTextColor(90, 106, 101); doc.text(k + ':', x, yy);
+        doc.setFont('helvetica', 'normal'); doc.setTextColor(21, 33, 29); doc.text(String(v), x + doc.getTextWidth(k + ': ') + 1, yy);
+      });
+      const linha = (l, resultado) => [resultado, l.def.nome, l.def.origem, l.h.art422 ? 'Sim' : '—',
+        l.km == null ? '—' : fmtKm(l.km), String(l.st.realizados), String(l.st.futuros),
+        (tempoDPE(l.def.ingresso) || {}).texto || '—', dataTexto(l.h.habilitadoEm)];
+      const corpo = [
+        ...designados.map((l) => linha(l, designados.length > 1 ? 'Designado(a)' : 'Designado(a)')),
+        ...suplentes.map((l, i) => linha(l, `${i + 1}º suplente`)),
+        ...r.desistentes.map((l) => linha(l, 'Desistiu')),
+      ];
+      doc.autoTable({
+        ...ESTILO_TABELA, startY: y + 16,
+        head: [['Resultado', 'Defensor(a)', 'Origem', 'Art. 422', 'Distância', 'Júris realizados', 'Júris futuros', 'Tempo de DPE', 'Habilitado em']],
+        body: corpo,
+        didParseCell: (d) => {
+          if (d.section !== 'body') return;
+          const res = d.row.raw[0];
+          if (res.startsWith('Designado')) { d.cell.styles.fontStyle = 'bold'; d.cell.styles.fillColor = [220, 235, 229]; }
+          if (res === 'Desistiu') d.cell.styles.textColor = [150, 150, 150];
+        },
+      });
+      rodape(doc, 'Ordem de classificação: 1) quem fez o art. 422 neste júri; 2) menor distância de rodoviária a rodoviária; 3) menos júris realizados; 4) menos júris futuros designados; 5) maior tempo de DPE.');
+      doc.save(`designacao-${nomeArquivo(j.comarca)}-${(j.processo || '').replace(/\D/g, '')}.pdf`);
+      toast('PDF gerado.');
+    } catch (e) { console.warn(e); toast('Não foi possível gerar o PDF: ' + e.message); }
+  }
+
+  async function gerarPdfGeral() {
+    try {
+      const logo = await prepararPdf();
+      const juris = state.juris.slice().sort((a, b) => (a.data || '9999').localeCompare(b.data || '9999'));
+      if (!juris.length) { toast('Nenhum júri registrado.'); return; }
+      const { doc, y } = novoDoc(logo, 'Designações do Júri — relatório geral', `${juris.length} júri(s) · emitido em ${agoraTexto()}`);
+      const corpo = juris.map((j) => {
+        const { designados, suplentes } = resultadoJuri(j);
+        return [dataTexto(j.data), j.comarca, j.processo, j.sei || '—',
+          designados.map((l) => l.def.nome).join('\n') || '—',
+          suplentes.slice(0, 3).map((l, i) => `${i + 1}º ${l.def.nome}`).join('\n') || '—',
+          (STATUS_BY[j.status] || STATUS[0]).label];
+      });
+      doc.autoTable({ ...ESTILO_TABELA, startY: y, head: [['Data', 'Comarca', 'Processo', 'Nº SEI', 'Designado(s)', 'Suplentes', 'Situação']], body: corpo });
+      const defs = state.defensores.filter((d) => d.ativo !== false).map((d) => ({ d, st: estatisticas(d.id) }))
+        .filter((x) => x.st.realizados || x.st.futuros || x.st.habilitacoes).sort((a, b) => a.d.nome.localeCompare(b.d.nome, 'pt-BR'));
+      if (defs.length) {
+        doc.autoTable({ ...ESTILO_TABELA, startY: doc.lastAutoTable.finalY + 10,
+          head: [['Defensor(a)', 'Origem', 'Júris realizados', 'Júris futuros', 'Habilitações', 'Tempo de DPE']],
+          body: defs.map(({ d, st }) => [d.nome, d.origem, String(st.realizados), String(st.futuros), String(st.habilitacoes), (tempoDPE(d.ingresso) || {}).texto || '—']) });
+      }
+      rodape(doc, 'Designações do Júri — Defensoria Pública do Estado da Bahia.');
+      doc.save(`designacoes-juri-${isoHoje()}.pdf`);
+      toast('Relatório gerado.');
+    } catch (e) { console.warn(e); toast('Não foi possível gerar o PDF: ' + e.message); }
+  }
+
   // ---- DataJud (CNJ): movimentações do processo, via função "datajud" da Supabase
   const consultandoDataJud = new Set();
   const fmtDataHora = (iso) => {
@@ -917,7 +1052,7 @@
     return `
     <div class="page-head">
       <div><div class="eyebrow">${state.juris.length} registrado(s)</div><h1>Júris</h1></div>
-      <div class="actions"><a class="btn primary" href="#novo-juri">+ Registrar júri</a></div>
+      <div class="actions"><button class="btn" data-action="pdf-geral">Relatório geral (PDF)</button><a class="btn primary" href="#novo-juri">+ Registrar júri</a></div>
     </div>
     <section class="panel">
       <div class="panel-head">
@@ -1024,7 +1159,7 @@
         <h1>${esc(j.comarca || 'Júri')}</h1>
         <div class="meta"><span class="mono">${esc(j.processo)}</span>${j.sei ? `<span>SEI <b class="mono">${esc(j.sei)}</b></span>` : ''}<span>${fmtData(j.data)}</span>${pillStatus(j)}</div>
       </div>
-      <div class="actions">${confirmarExclusao ? '' : `<button class="btn danger" data-action="pedir-excluir-juri">Excluir júri</button>`}</div>
+      <div class="actions"><button class="btn primary" data-action="pdf-juri">Baixar resultado (PDF)</button>${confirmarExclusao ? '' : `<button class="btn danger" data-action="pedir-excluir-juri">Excluir júri</button>`}</div>
     </div>
     ${confirmarExclusao ? `<div class="confirm-bar"><span>Excluir este júri e todas as habilitações dele? Esta ação não pode ser desfeita.</span>
       <button class="btn danger" data-action="excluir-juri">Sim, excluir</button><button class="btn" data-action="cancelar-confirmacao">Cancelar</button></div>` : ''}
@@ -1042,6 +1177,7 @@
         <div class="actions" style="display:flex;gap:8px;flex-wrap:wrap">
           ${nuvem.tipo === 'claude' ? '' : `<button class="btn sm" data-action="recalcular"${calculando ? ' disabled' : ''}>${calculando ? 'Calculando…' : 'Recalcular distâncias'}</button>`}
           ${r.vagas && r.ativos.length ? `<button class="btn sm primary" data-action="aplicar-resultado">Designar os ${Math.min(r.vagas, r.ativos.length)} primeiro(s)</button>` : ''}
+          ${r.ativos.some((l) => l.h.designado) ? '<button class="btn sm primary" data-action="pdf-juri">Baixar resultado (PDF)</button>' : ''}
         </div>
       </div>
       <div class="panel-body">
@@ -1362,12 +1498,14 @@
       case 'filtro-juris': ui.jurisFiltro = alvo.dataset.v; render(); break;
       case 'recalcular': pedirDistancias(j, true); break;
       case 'datajud': consultarDataJud(j, false); break;
+      case 'pdf-juri': gerarPdfJuri(j); break;
+      case 'pdf-geral': gerarPdfGeral(); break;
       case 'aplicar-resultado': {
         const c = classificar(j);
         const designar = new Set(c.ativos.slice(0, c.vagas).map((l) => l.def.id));
         j.habilitacoes.forEach((h) => { h.designado = !h.desistiu && designar.has(h.defensorId); });
         salvar(); render();
-        toast(c.empateNaVaga ? 'Designação aplicada. Atenção: há empate na última vaga.' : 'Designação aplicada conforme a classificação.');
+        toast(c.empateNaVaga ? 'Designação aplicada. Atenção: há empate na última vaga.' : 'Designação aplicada. Use “Baixar resultado (PDF)” para divulgar.');
         break;
       }
       case 'h-desistir':
