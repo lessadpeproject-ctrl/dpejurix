@@ -776,6 +776,57 @@
 
   // ------------------------------------------------------------------ telas
 
+  // ---- DataJud (CNJ): movimentações do processo, via função "datajud" da Supabase
+  const consultandoDataJud = new Set();
+  const fmtDataHora = (iso) => {
+    if (!iso) return '—';
+    const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?/);
+    return m ? esc(`${m[3]}/${m[2]}/${m[1]}${m[4] ? ` ${m[4]}:${m[5]}` : ''}`) : esc(iso);
+  };
+  async function consultarDataJud(j, silencioso) {
+    if (nuvem.tipo !== 'supabase' || !j || consultandoDataJud.has(j.id)) return;
+    consultandoDataJud.add(j.id); render();
+    try {
+      const r = await fetch(SB.url + '/functions/v1/datajud', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: SB.key, 'x-sessao': nuvem.usuario ? nuvem.usuario.token : '' },
+        body: JSON.stringify({ numero: j.processo }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.erro || 'erro ' + r.status);
+      const atual = juriById(j.id);
+      if (atual) { atual.datajud = { ...d, consultadoEm: new Date().toISOString() }; salvar(); }
+      if (!silencioso) toast(d.encontrado ? 'Movimentações atualizadas.' : 'Processo não encontrado no DataJud.');
+    } catch (e) {
+      if (!silencioso) toast('Não foi possível consultar o DataJud: ' + e.message);
+    } finally { consultandoDataJud.delete(j.id); render(); }
+  }
+  // consulta de novo se a última tem mais de 12 horas
+  function datajudVencido(j) {
+    return !j.datajud || !j.datajud.consultadoEm || Date.now() - Date.parse(j.datajud.consultadoEm) > 12 * 3600e3;
+  }
+
+  function painelMovimentacoes(j) {
+    const dj = j.datajud;
+    const carregando = consultandoDataJud.has(j.id);
+    const botao = nuvem.tipo === 'supabase' ? `<button class="btn sm" data-action="datajud"${carregando ? ' disabled' : ''}>${carregando ? 'Consultando…' : 'Atualizar'}</button>` : '';
+    let corpo;
+    if (nuvem.tipo !== 'supabase') corpo = '<div class="empty"><span>A consulta ao DataJud funciona no site publicado (dpejurix.netlify.app).</span></div>';
+    else if (!dj) corpo = `<div class="empty"><span>${carregando ? 'Consultando o DataJud…' : 'Ainda não consultado.'}</span></div>`;
+    else if (!dj.encontrado) corpo = '<div class="empty"><strong>Processo não encontrado no DataJud</strong><span>Confira o número. Processos muito recentes podem levar alguns dias para aparecer.</span></div>';
+    else corpo = `<div class="panel-body" style="padding-bottom:0"><div class="meta">
+        ${dj.classe ? `<span><b>${esc(dj.classe)}</b></span>` : ''}${dj.orgao ? `<span>${esc(dj.orgao)}</span>` : ''}
+        ${dj.ajuizamento ? `<span>Ajuizado em ${fmtDataHora(dj.ajuizamento).slice(0, 10)}</span>` : ''}</div></div>
+      <ul class="mov-list">${(dj.movimentos || []).slice(0, 15).map((m) => `<li>
+        <span class="mov-data num">${fmtDataHora(m.data)}</span>
+        <span class="mov-nome">${esc(m.nome)}${m.detalhe ? `<span class="small muted"> · ${esc(m.detalhe)}</span>` : ''}</span></li>`).join('') || '<li class="muted">Sem movimentações.</li>'}</ul>`;
+    return `<section class="panel">
+      <div class="panel-head"><h2>Movimentações do processo <span class="muted small">DataJud/CNJ</span></h2>
+        <div class="actions" style="display:flex;gap:10px;align-items:center">${dj && dj.consultadoEm ? `<span class="small muted">consultado em ${fmtDataHora(dj.consultadoEm.replace(/\.\d+Z$/, ''))}</span>` : ''}${botao}</div></div>
+      ${corpo}
+    </section>`;
+  }
+
   function telaPainel() {
     const t = totais();
     const hoje = isoHoje();
@@ -796,6 +847,20 @@
       <div class="kpi k-accent"><span class="label">Concluídos</span><span class="value">${t.concluidos}</span><span class="hint">encerrados com qualquer desfecho</span></div>
       <div class="kpi"><span class="label">Total registrado</span><span class="value">${t.total}</span><span class="hint">processos cadastrados</span></div>
     </section>
+
+    ${(() => {
+      const ult = state.juris.filter((j) => j.datajud && j.datajud.movimentos && j.datajud.movimentos.length)
+        .map((j) => ({ j, m: j.datajud.movimentos[0] })).sort((a, b) => String(b.m.data).localeCompare(String(a.m.data))).slice(0, 8);
+      if (!ult.length) return '';
+      return `<section class="panel">
+        <div class="panel-head"><h2>Últimas movimentações</h2><span class="small muted">DataJud/CNJ, atualizado ao abrir cada júri</span></div>
+        <div class="table-wrap"><table><thead><tr><th>Data</th><th>Comarca</th><th>Processo</th><th>Movimentação</th></tr></thead><tbody>
+        ${ult.map(({ j, m }) => `<tr class="clickable" data-href="#juri-${j.id}">
+          <td class="num" style="white-space:nowrap">${fmtDataHora(m.data)}</td><td>${esc(j.comarca)}</td>
+          <td><a class="name mono" href="#juri-${j.id}">${esc(j.processo)}</a></td>
+          <td>${esc(m.nome)}${m.detalhe ? `<span class="small muted"> · ${esc(m.detalhe)}</span>` : ''}</td></tr>`).join('')}
+        </tbody></table></div></section>`;
+    })()}
 
     <section class="panel">
       <div class="panel-head">
@@ -968,6 +1033,8 @@
       <div class="panel-head"><h2>Dados do júri</h2><span class="small muted">As alterações são salvas automaticamente.</span></div>
       <div class="panel-body">${formJuri(j, false)}</div>
     </section>
+
+    ${painelMovimentacoes(j)}
 
     <section class="panel">
       <div class="panel-head">
@@ -1215,7 +1282,11 @@
     if (chaveTela !== ultimaTela) {
       ultimaTela = chaveTela;
       window.scrollTo(0, 0);
-      if (r.tela === 'juri') pedirDistancias(juriById(r.id));
+      if (r.tela === 'juri') {
+        const jr = juriById(r.id);
+        pedirDistancias(jr);
+        if (jr && datajudVencido(jr)) setTimeout(() => consultarDataJud(jr, true), 0);
+      }
     } else if (foco) {
       const el = document.getElementById(foco.id);
       if (el) { el.focus(); try { if (foco.s != null) el.setSelectionRange(foco.s, foco.e); } catch (e) { /* type=date/number */ } }
@@ -1290,6 +1361,7 @@
       }
       case 'filtro-juris': ui.jurisFiltro = alvo.dataset.v; render(); break;
       case 'recalcular': pedirDistancias(j, true); break;
+      case 'datajud': consultarDataJud(j, false); break;
       case 'aplicar-resultado': {
         const c = classificar(j);
         const designar = new Set(c.ativos.slice(0, c.vagas).map((l) => l.def.id));
@@ -1373,6 +1445,7 @@
       j[el.name] = typeof v === 'string' ? v.trim() : v;
       salvar(); render(); toast('Salvo.');
       if (el.name === 'comarca' && antes !== j.comarca) pedirDistancias(j);
+      if (el.name === 'processo') { delete j.datajud; consultarDataJud(j, true); }
       return;
     }
 
