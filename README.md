@@ -4,7 +4,7 @@ Microsite para organizar os júris, as habilitações dos defensores e a ordem d
 Substitui a planilha de controle mensal por telas simples:
 
 - **Painel**: total de júris realizados, em andamento e concluídos. Abaixo, todos os defensores com júris realizados, júris futuros e tempo de DPE. Clique no nome para abrir o perfil.
-- **Júris**: registre o número do processo, a comarca, o número SEI (e SEI complementar), a data, as vagas e a situação. Depois habilite os defensores inscritos: a lista mostra nome, cidade e distância aproximada, e dá para marcar vários de uma vez.
+- **Júris**: filtros Todos, Em andamento, Sem defensor (em andamento sem ninguém designado), Realizados e Concluídos, com contagem, e filtro por período (data de… até…). Registre o número do processo, a comarca, o número SEI (e SEI complementar), a data, as vagas e a situação. Depois habilite os defensores inscritos: a lista mostra nome, cidade e distância aproximada, e dá para marcar vários de uma vez.
 - **Habilitação**: para cada defensor habilitado o site calcula a distância da rodoviária da cidade de origem até a rodoviária da comarca, mostra o link da rota no Google Maps e classifica automaticamente:
   1. quem fez o **art. 422** naquele júri tem prioridade;
   2. menor distância;

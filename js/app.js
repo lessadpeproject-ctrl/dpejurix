@@ -714,7 +714,7 @@
 
   const ui = {
     defBusca: '', defOrdem: { chave: 'nome', dir: 1 },
-    jurisFiltro: 'todos', jurisBusca: '',
+    jurisFiltro: 'todos', jurisBusca: '', jurisDe: '', jurisAte: '',
     confirmar: null, // { tipo, id }
     habBusca: '', habSel: new Set(), habData: '', hab422: false,
   };
@@ -1045,16 +1045,24 @@
   function telaJuris() {
     const busca = norm(ui.jurisBusca);
     const hoje = isoHoje();
-    const filtros = [['todos', 'Todos'], ['andamento', 'Em andamento'], ['realizado', 'Realizados'], ['concluido', 'Concluídos']];
+    const semDefensor = (j) => grupoDe(j) === 'andamento' && !j.habilitacoes.some((h) => h.designado && !h.desistiu);
+    const noFiltro = {
+      todos: () => true,
+      andamento: (j) => grupoDe(j) === 'andamento',
+      semdef: semDefensor,
+      realizado: (j) => grupoDe(j) === 'realizado',
+      concluido: (j) => grupoDe(j) !== 'andamento',
+    };
+    const noPeriodo = (j) => (!ui.jurisDe || (j.data && j.data >= ui.jurisDe)) && (!ui.jurisAte || (j.data && j.data <= ui.jurisAte));
+    const filtros = [['todos', 'Todos'], ['andamento', 'Em andamento'], ['semdef', 'Sem defensor'], ['realizado', 'Realizados'], ['concluido', 'Concluídos']]
+      .map(([v, l]) => [v, l, state.juris.filter((j) => noFiltro[v](j) && noPeriodo(j)).length]);
+    const futuroPrimeiro = ui.jurisFiltro === 'andamento' || ui.jurisFiltro === 'semdef';
     const lista = state.juris.filter((j) => {
-      const g = grupoDe(j);
-      if (ui.jurisFiltro === 'andamento' && g !== 'andamento') return false;
-      if (ui.jurisFiltro === 'realizado' && g !== 'realizado') return false;
-      if (ui.jurisFiltro === 'concluido' && g === 'andamento') return false;
+      if (!(noFiltro[ui.jurisFiltro] || noFiltro.todos)(j) || !noPeriodo(j)) return false;
       if (!busca) return true;
       const nomes = j.habilitacoes.map((h) => (defById(h.defensorId) || {}).nome).join(' ');
       return [j.processo, j.comarca, j.sei, j.seiComplementar, nomes].some((v) => norm(v).includes(busca));
-    }).sort((a, b) => (b.data || '').localeCompare(a.data || ''));
+    }).sort((a, b) => futuroPrimeiro ? (a.data || '9999').localeCompare(b.data || '9999') : (b.data || '').localeCompare(a.data || ''));
 
     return `
     <div class="page-head">
@@ -1063,8 +1071,14 @@
     </div>
     <section class="panel">
       <div class="panel-head">
-        <div class="filters">${filtros.map(([v, l]) => `<button class="chip-btn${ui.jurisFiltro === v ? ' on' : ''}" data-action="filtro-juris" data-v="${v}">${l}</button>`).join('')}</div>
+        <div class="filters">${filtros.map(([v, l, n]) => `<button class="chip-btn${ui.jurisFiltro === v ? ' on' : ''}${v === 'semdef' && n ? ' alerta' : ''}" data-action="filtro-juris" data-v="${v}">${l} <span class="chip-n">${n}</span></button>`).join('')}</div>
         <input id="juris-busca" class="search" type="search" placeholder="Processo, comarca, SEI ou defensor" value="${esc(ui.jurisBusca)}" aria-label="Buscar júri">
+      </div>
+      <div class="periodo">
+        <label for="juris-de">Data de</label><input id="juris-de" type="date" value="${esc(ui.jurisDe)}">
+        <label for="juris-ate">até</label><input id="juris-ate" type="date" value="${esc(ui.jurisAte)}">
+        ${ui.jurisDe || ui.jurisAte ? '<button class="btn sm" data-action="limpar-periodo">Limpar datas</button>' : ''}
+        <span class="muted small">${lista.length} júri(s) na lista</span>
       </div>
       ${lista.length ? `<div class="table-wrap"><table>
         <thead><tr><th>Data</th><th>Processo</th><th>Comarca</th><th>Nº SEI</th><th class="r">Habilitados</th><th>Designado(s)</th><th>Situação</th></tr></thead>
@@ -1503,6 +1517,7 @@
         render(); break;
       }
       case 'filtro-juris': ui.jurisFiltro = alvo.dataset.v; render(); break;
+      case 'limpar-periodo': ui.jurisDe = ''; ui.jurisAte = ''; render(); break;
       case 'recalcular': pedirDistancias(j, true); break;
       case 'datajud': consultarDataJud(j, false); break;
       case 'pdf-juri': gerarPdfJuri(j); break;
@@ -1565,6 +1580,11 @@
     }
     if (el.id === 'hab-422') { ui.hab422 = el.checked; return; }
     if (el.id === 'hab-data') { ui.habData = el.value; return; }
+    if (el.id === 'juris-de' || el.id === 'juris-ate') {
+      const v = DATA_OK.test(el.value) ? el.value : '';
+      if (el.id === 'juris-de') ui.jurisDe = v; else ui.jurisAte = v;
+      render(); return;
+    }
 
     // checkboxes e km da tabela de habilitados
     if (el.dataset.action && r.tela === 'juri') {

@@ -229,6 +229,12 @@ input.mono { font-family: var(--f-mono); font-size: .9rem; }
 .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .chip-btn { font: inherit; font-size: .82rem; font-weight: 600; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); cursor: pointer; }
 .chip-btn.on { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.chip-btn .chip-n { font-weight: 500; opacity: .75; margin-left: 2px; }
+.chip-btn.alerta { color: var(--warn); border-color: var(--warn-soft); }
+.chip-btn.alerta.on { background: var(--warn-soft); color: var(--warn); }
+.periodo { display: flex; gap: 8px 10px; flex-wrap: wrap; align-items: center; padding: 10px 18px; border-bottom: 1px solid var(--line); font-size: .85rem; }
+.periodo label { color: var(--muted); font-weight: 600; }
+.periodo input[type="date"] { width: auto; padding: 5px 8px; }
 
 .toast {
   position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(20px + env(safe-area-inset-bottom, 0px));
